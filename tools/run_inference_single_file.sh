@@ -79,7 +79,7 @@ if [[ "$INPUT_EXT_LOWER" == "las" || "$INPUT_EXT_LOWER" == "laz" ]]; then
     conda activate forestformer3d
     set -u  # Re-enable unbound variable checking
     
-    python tools/convert_las_to_ply.py "$INPUT_FILE" "$PLY_FILE"
+    python "$WORK_DIR/tools/convert_las_to_ply.py" "$INPUT_FILE" "$PLY_FILE"
     
     if [ ! -f "$PLY_FILE" ]; then
         echo "Error: Conversion failed"

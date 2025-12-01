@@ -24,8 +24,5 @@ trimesh==3.21.6
 # C++ Extension Support
 pybind11==2.10.4
 
-# Additional dependencies (if needed)
-# opencv-python  # Uncomment if needed
-# matplotlib  # Uncomment if needed
-# tqdm  # Usually included with mmengine
+wandb
 

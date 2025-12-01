@@ -1,447 +1,166 @@
-# ForestFormer3D: A Unified Framework for End-to-End Segmentation of Forest LiDAR 3D Point Clouds
+# ForestFormer3D
 
-This is the official implementation of the paper:
+Deep learning model for LiDAR tree point cloud segmentation (branches/leaves).
 
-**"ForestFormer3D: A Unified Framework for End-to-End Segmentation of Forest LiDAR 3D Point Clouds"**
+## Setup
 
-(*Accepted as Oral at ICCV 2025 –  🏝️ Honolulu!* 🎉)
-
-- 🌐 [Project page](https://bxiang233.github.io/FF3D/)
-- 📄 [Paper on arXiv](https://www.arxiv.org/abs/2506.16991)
-- 📦 [Dataset & pre-trained model on zenodo](https://zenodo.org/records/16742708)
-
----
-
-## 📚 Citation
-
-If you find this project helpful, please cite our paper:
-
-```bibtex
-@inproceedings{xiang2025forestformer3d,
-  title     = {ForestFormer3D: A Unified Framework for End-to-End Segmentation of Forest LiDAR 3D Point Clouds},
-  author    = {Binbin Xiang and Maciej Wielgosz and Stefano Puliti and Kamil Král and Martin Krůček and Azim Missarov and Rasmus Astrup},
-  booktitle = {Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV)},
-  year      = {2025}
-}
-```
-
----
-
-🆕 📢 ## For a faster way to run ForestFormer3D inference on your own test data, please use the following instruction:
-[FF3D_inference – ff3d_forestsens](https://github.com/bxiang233/FF3D_inference/tree/main/ff3d_forestsens)
-
-This version uses 2 inference iterations by default. If your trees are not extremely densely distributed, you can set the number of iterations to 1 instead.
-
-# ForestFormer3D environment setup
-This guide provides step-by-step instructions to build and configure the Docker environment for ForestFormer3D, set up debugging in Visual Studio Code, and resolve common issues.
-
-At first, please download the dataset and pretrained model from Zenodo, and unzip and place them in the correct locations. Make sure the directory structure looks like:
-
+### Environment
 ```bash
-ForestFormer3D/
-├── data/
-│   └── ForAINetV2/
-│       ├── train_val_data/
-│       └── test_data/
-├── work_dirs/
-│   └── clean_forestformer/
-│       └── epoch_3000_fix.pth
+source /home/rkaharly/miniconda/etc/profile.d/conda.sh
+conda activate forestformer3d
+cd /home/rkaharly/ForestFormer3D
 ```
----
 
-## Steps to build and configure the environment
+### Required Files
+- Model checkpoint: `work_dirs/clean_forestformer/epoch_3000_fix.pth`
+- Config: `configs/oneformer3d_qs_radius16_qp300_2many.py`
+- Test data: Place files in `data/ForAINetV2/test_data/` or use `--input` flag
 
-### **1. Build Docker image**
+## Quick Start
 
+### Run Inference
 ```bash
-# Navigate to the project directory
-cd #locationoftheproject#
+# Single file
+python infer_forestformer3d.py --input test_files/256_leafon.ply
 
-# Build the Docker image
-sudo docker build -t forestformer3d-image .
-
-# Run the Docker container with GPU support, shared memory allocation, and port mapping
-sudo docker run --gpus all --shm-size=128g -d -p 127.0.0.1:49211:22 \
-  -v #locationofproject#:/workspace \
-  -v segmentator:segmentator \
-  --name forestformer3d-container forestformer3d-image
-
-# Enter the running container
-sudo docker exec -it forestformer3d-container /bin/bash
-
-# Verify required files exist in your container
-# ls
-# Expected output:
-# Dockerfile  configs  data  oneformer3d  readme  replace_mmdetection_files  segmentator  tools  work_dirs
+# Multiple files or directory
+python infer_forestformer3d.py --input file1.ply file2.las test_files/
 ```
 
-### **2. Resolve Torch-Points-Kernels import error**
- 
-```bash
-#test whether you successfully installed torch_points_kernels
-python -c "from torch_points_kernels import instance_iou; print('torch-points-kernels loaded successfully')"
-```
-and if you encounter the following error:
+Output: `work_dirs/output/round_1/<filename>_round1.ply`
 
-```bash
-ModuleNotFoundError: No module named 'torch_points_kernels.points_cuda'
-```
-
-please try to fix it by:
-```bash
-# Uninstall the existing torch-points-kernels version
-pip uninstall torch-points-kernels -y
-
-# Reinstall the specific compatible version
-pip install --no-deps --no-cache-dir torch-points-kernels==0.7.0
-```
-
-### **3. Reinstall torch-cluster**
-```bash
-pip uninstall torch-cluster
-pip install torch-cluster --no-cache-dir --no-deps
-```
-
-### **4. Replace required files**
-
-```bash
-# Find the mmengine package path
-pip show mmengine
-
-# Replace the following files with updated versions:
-cp replace_mmdetection_files/loops.py /opt/conda/lib/python3.10/site-packages/mmengine/runner/
-cp replace_mmdetection_files/base_model.py /opt/conda/lib/python3.10/site-packages/mmengine/model/base_model/
-cp replace_mmdetection_files/transforms_3d.py /opt/conda/lib/python3.10/site-packages/mmdet3d/datasets/transforms/
-```
-
-### **5. Run the program**
-
-#### **Data preparation**
-
-Ensure the following three folders are set up in your workspace:
-
-- `data/ForAINetV2/meta_data`
-- `data/ForAINetV2/test_data`
-- `data/ForAINetV2/train_val_data`
-
-- Place all `.ply` files for training and validation in the `train_val_data` folder.
-- Place all `.ply` files for testing in the `test_data` folder.
-
-#### **Data preprocessing steps**
-
-```bash
-# Step 1: Navigate to the data folder
-cd data/ForAINetV2
-
-pip install laspy
-pip install "laspy[lazrs]"
-
-# Step 2: Run the data loader script
-python batch_load_ForAINetV2_data.py
-# After this you will have folder data/ForAINetV2/forainetv2_instance_data
-
-# Step 3: Navigate back to the main directory
-cd ../..
-
-# Step 4: Create data for training
-python tools/create_data_forainetv2.py forainetv2
-```
-
-#### **Start training**
-```bash
-export PYTHONPATH=/workspace
-# Run the training script with the specified configuration and work directory
-CUDA_VISIBLE_DEVICES=0 python tools/train.py configs/oneformer3d_qs_radius16_qp300_2many.py \
-  --work-dir work_dirs/<output_folder_name>
-```
-
-#### **Run testing**
-##### Use your own trained Checkpoint
-```bash
-#1. Fix the checkpoint file:
-python tools/fix_spconv_checkpoint.py \
-  --in-path work_dirs/oneformer3d_1xb4_forainetv2/trained.pth \
-  --out-path work_dirs/oneformer3d_1xb4_forainetv2/trained_fix.pth
-
-#2. Modify the output_path in function "predict" in class ForAINetV2OneFormer3D_XAwarequery in file oneformer3d/oneformer3d.py
-
-#3. Run the test script:
-CUDA_VISIBLE_DEVICES=0 python tools/test.py configs/oneformer3d_qs_radius16_qp300_2many.py \
-  work_dirs/oneformer3d_1xb4_forainetv2/trained_fix.pth
-
-```
-##### Load pre-trained model
-```bash
-# If you want to use the official pre-trained model, run:
-CUDA_VISIBLE_DEVICES=0 python tools/test.py configs/oneformer3d_qs_radius16_qp300_2many.py work_dirs/clean_forestformer/epoch_3000_fix.pth
-
-```
-
----
-
-## Test your own test files
-
-To evaluate your own test files, follow these steps:
-
-### 1. Copy test files
-
-Place your test files under the following directory:
-
-```
-data/ForAINetV2/test_data
-```
-
-### 2. Update the test list
-
-Edit the following file:
-
-```
-data/ForAINetV2/meta_data/test_list.txt
-```
-
-Append the base names (without extension) of your test files. For example:
-
-```
-your_custom_test_file_name  # <-- add your file name here
-```
-
-
-### 3. Re-run data preprocessing
-
-```bash
-# Step 1: Navigate to the data folder
-cd data/ForAINetV2
-
-# Step 2: Install required libraries (if not already installed)
-pip install laspy
-pip install "laspy[lazrs]"
-
-# Step 3: Run the data loader script
-python batch_load_ForAINetV2_data.py
-# This will regenerate data/ForAINetV2/forainetv2_instance_data
-
-# Step 4: Navigate back to the main directory
-cd ../..
-
-# Step 5: Create data for training/testing
-python tools/create_data_forainetv2.py forainetv2
-```
-
-### 4. Run testing script again
-
-Once preprocessing is complete, you can run:
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python tools/test.py configs/oneformer3d_qs_radius16_qp300_2many.py work_dirs/clean_forestformer/epoch_3000_fix.pth
-```
-
-
----
-
-## ⚠️ Using non-ply test files
-
-If your test files are **not in `.ply` format**, you need to modify the data loading logic.
-
-### 1. Update `batch_load_ForAINetV2_data.py`
-
-File path:
-```
-data/ForAINetV2/batch_load_ForAINetV2_data.py
-```
-
-Find the function `export_one_scan()` and modify:
-
+### Run Evaluation
+1. Edit `evaluate_forestformer3d.py`, add files to `CONFIG.EVALUATION_FILES`:
 ```python
-ply_file = osp.join(forainetv2_dir, scan_name + '.ply')
+EVALUATION_FILES = [
+    "test_files/256_leafon.ply",
+    "test_files/108_leafon.ply",
+]
 ```
 
-to match your test file format, for example:
-
-```python
-pc_file = osp.join(forainetv2_dir, scan_name + '.laz')  # or other formats
-```
-
----
-
-### 2. Update `load_forainetv2_data.py` to support new format
-
-File path:
-```
-data/ForAINetV2/load_forainetv2_data.py
-```
-
-Find the function `export()` and modify:
-
-```python
-pcd = read_ply(ply_file)
-```
-
-If you're using `.laz`, replace with something like:
-
-```python
-import laspy
-
-def read_laz(filename):
-    las = laspy.read(filename)
-    return {
-        "x": las.x,
-        "y": las.y,
-        "z": las.z,
-        # Add more fields as needed
-    }
-
-pcd = read_laz(ply_file)
-```
-
----
-
-### 3. If test files do not have ground truth labels
-
-Still in `load_forainetv2_data.py`, locate the following lines:
-
-```python
-semantic_seg = pcd["semantic_seg"].astype(np.int64)
-treeID = pcd["treeID"].astype(np.int64)
-```
-
-If the test file lacks these labels, replace them with:
-
-```python
-semantic_seg = np.ones((points.shape[0],), dtype=np.int64)
-treeID = np.zeros((points.shape[0],), dtype=np.int64)
-# semantic_seg = pcd["semantic_seg"].astype(np.int64)
-# treeID = pcd["treeID"].astype(np.int64)
-```
-
-This will prevent errors when labels are missing in test data.
-
-
-**Recommendation**: The **easiest solution** is to convert your test files to `.ply` format in advance. This avoids having to change the code and ensures full compatibility with the pipeline.
-
----
-## **Optional Tips**
-
-#### **Tensorboard Visualization**
+2. Run:
 ```bash
-tensorboard --logdir=work_dirs/YOUR_OUTPUT_FOLDER/vis_data/ --host=0.0.0.0 --port=6006
+python evaluate_forestformer3d.py --save-classified-clouds
 ```
 
-#### **Configure SSH for Debugging in Visual Studio Code**
+Output: Metrics logged to W&B, report in `evaluation_results_forestformer3d/`
+
+## Scripts
+
+### `infer_forestformer3d.py` - Inference
+
+Run inference on PLY/LAS/LAZ files.
+
+**Usage:**
 ```bash
-# Install and start OpenSSH server
-apt-get install -y openssh-server
-service ssh start
-
-# Set a password for the root user
-passwd root
-
-# Modify SSH configuration to enable root login and password authentication
-echo -e "PermitRootLogin yes\nPasswordAuthentication yes" >> /etc/ssh/sshd_config
-
-# Restart the SSH service
-service ssh restart
+python infer_forestformer3d.py --input <file_or_dir> [options]
 ```
 
-To connect via SSH in VS Code, ensure you forward port 22 of the container to a host port during docker run. For example, include -p 127.0.0.1:49211:22 in your docker run command.
+**Options:**
+- `--input`: Input file(s) or directory (required)
+- `--output`: Output directory (default: `work_dirs/output`)
+- `--model`: Model checkpoint path (default: auto-detect)
+- `--config`: Config file path (default: `configs/oneformer3d_qs_radius16_qp300_2many.py`)
+- `--cuda-device`: GPU ID (default: 0)
+- `--verbose`: Detailed logging
 
-
-## 🌲 Handling missed detections in dense test data
-
-In extremely dense test plots, the initial inference run may miss some trees. To address this, we apply ForestFormer3D a second time **only on the remaining points** that were not segmented in the first round.
-
-You can perform this secondary inference by running:
-
+**Examples:**
 ```bash
-bash tools/inference_bluepoint.sh
+python infer_forestformer3d.py --input test_files/256_leafon.las
+python infer_forestformer3d.py --input file1.ply file2.las --output my_results/
 ```
 
-This script re-runs inference on remaining "blue points" after the first round.
+### `evaluate_forestformer3d.py` - Evaluation
 
-### 🛠️ How to use
+Evaluate predictions against ground truth and log to W&B.
 
-1. Prepare your test data as usual (see earlier sections).
-2. Instead of running `tools/test.py`, execute:
-
+**Usage:**
 ```bash
-bash tools/inference_bluepoint.sh
+python evaluate_forestformer3d.py [options]
 ```
 
-3. Make the following adjustments before running:
+**Options:**
+- `--save-classified-clouds`: Save classified point clouds
+- `--output`: Output directory (default: `evaluation_results_forestformer3d/`)
+- `--model-checkpoint`: Model checkpoint path (default: auto-detect)
+- `--verbose`: Detailed logging
 
-- Put all your test file names in:
+**Configuration:**
+Edit `CONFIG` class in the script:
+- `EVALUATION_FILES`: List of ground truth file paths
+- `USE_FILTERED_OUTPUT`: Use filtered predictions (default: False)
+- `PREDICTION_OUTPUT_DIR`: Directory with predictions (default: `work_dirs/output/round_1`)
+- `SPATIAL_MATCH_TOLERANCE`: Point matching tolerance in meters (default: 0.01)
 
-```
-data/ForAINetV2/meta_data/test_list_initial.txt
-```
-
-instead of the default `test_list.txt`.
-
-- Modify `BLUEPOINTS_DIR` in the script to match your output directory (the output_path in function "predict" in class ForAINetV2OneFormer3D_XAwarequery in file workspace/oneformer3d/oneformer3d.py), for example:
-
+**Examples:**
 ```bash
-BLUEPOINTS_DIR="$WORK_DIR/work_dirs/YOUROUTPUTPATH"
+# Edit EVALUATION_FILES in script first, then:
+python evaluate_forestformer3d.py
+python evaluate_forestformer3d.py --save-classified-clouds --verbose
 ```
 
-- In the file:
-```
-oneformer3d/oneformer3d.py
-```
-Inside the function `predict` of class `ForAINetV2OneFormer3D_XAwarequery`, change:
+### `tools/convert_las_to_ply.py` - File Conversion
 
-```python
-self.save_ply_withscore(...)
-# self.save_bluepoints(...)
+Convert LAS/LAZ to PLY preserving all fields.
+
+**Usage:**
+```bash
+python tools/convert_las_to_ply.py input.las output.ply
 ```
 
-to:
+## File Formats
 
-```python
-# self.save_ply_withscore(...)
-self.save_bluepoints(...)
-```
+**Input (Inference):**
+- `.ply`, `.las`, `.laz`
 
-- Also replace:
+**Output (Inference):**
+- `.ply` with `semantic_pred` field:
+  - `0` or `1` = branch
+  - `2` = leaf
 
-```python
-# is_test = True
-# if is_test:
-if 'test' in lidar_path:
-```
-with the appropriate logic to ensure test mode is active when needed:
+**Ground Truth (Evaluation):**
+- `.ply` with `scalar_Classification` or `classification` field (0=branch, 1=leaf)
+- `.las`/`.laz` with `classification` field (0=branch, 1=leaf)
 
-```python
-is_test = True
-if is_test:
-#if 'test' in lidar_path:
-```
+## Output Locations
 
-This two-step (or multiple-step) inference improves robustness in challenging, highly dense forests.
+**Inference:**
+- Raw: `work_dirs/output/round_1/<filename>_round1.ply`
+- Filtered: `work_dirs/output/round_1_after_remove_noise_200/<filename>_round1.ply`
 
----
-## 🙋‍♀️ Questions & suggestions
+**Evaluation:**
+- Report: `evaluation_results_forestformer3d/evaluation_TIMESTAMP/evaluation_report.txt`
+- Classified clouds: Same directory (if `--save-classified-clouds`)
+- W&B: Project "tree-segmentation"
 
-Welcome to ask questions via Issues! This helps more people see the discussion and avoid duplicated questions.
+## W&B Metrics
 
-🔍 Before opening a new issue, please check if someone has already asked the same question.  
-Thank you for your cooperation, and we’re looking forward to your suggestions and ideas! 🌟
+Logged metrics include:
+- Overall: accuracy, precision, recall, F1, Jaccard
+- Per-class: branch/leaf precision, recall, F1, Jaccard
+- Height-stratified: F1 scores for lower/middle/upper tree sections
+- Confusion matrix: TP, FP, TN, FN counts
 
----
-## 💡Note on training GPU requirements
+## Troubleshooting
 
-The training was run on a single A100 GPU. If you're using a GPU with less memory, try reducing the cylinder radius in the config to prevent OOM.
+**LAS conversion fails:**
+- Ensure `laspy` is installed: `pip install laspy`
 
-For inference, batch_size is not used, because each cylinder is processed sequentially. If you encounter CUDA OOM issues during inference, try:
+**CUDA out of memory:**
+- Use different GPU: `--cuda-device 1`
+- Reduce batch size in config
 
-1. Lowering the chunk value in the config
+**No prediction file found:**
+- Run inference first
+- Check file names match (ground truth: `file.ply` → prediction: `file_round1.ply`)
 
-2. Reducing `num_points` in the code ([see this line](https://github.com/SmartForest-no/ForestFormer3D/blob/8ca0f45196ce0cc8a656d046b3f935cbf34f315b/oneformer3d/oneformer3d.py#L2273))
+**Points don't match in evaluation:**
+- Normal if coordinates differ slightly
+- Adjust `SPATIAL_MATCH_TOLERANCE` in `CONFIG` (default: 0.01m)
 
-3. Reducing the cylinder radius, which is also configurable in the config file.
+## Notes
 
----
-## 📝 License
-ForestFormer3D is based on the OneFormer3D codebase by Danila Rukhovich (https://github.com/filaPro/oneformer3d),  
-which is licensed under the Creative Commons Attribution-NonCommercial 4.0 International License (CC BY-NC 4.0).
+- Model expects PLY format; LAS/LAZ are auto-converted
+- Evaluation uses spatial matching (KDTree) to align prediction and ground truth points
+- Default model: `work_dirs/clean_forestformer/epoch_3000_fix.pth`
 
-This repository is therefore also released under the same license.  
-Please cite appropriately if you use or modify this code. Thank you.
