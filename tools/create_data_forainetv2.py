@@ -20,9 +20,9 @@ def forainetv2_data_prep(root_path, info_prefix, out_dir, workers):
     info_train_path = osp.join(out_dir, f'{info_prefix}_oneformer3d_infos_train.pkl')
     info_val_path = osp.join(out_dir, f'{info_prefix}_oneformer3d_infos_val.pkl')
     info_test_path = osp.join(out_dir, f'{info_prefix}_oneformer3d_infos_test.pkl')
-    update_pkl_infos(info_prefix, out_dir=out_dir, pkl_path=info_train_path)
-    update_pkl_infos(info_prefix, out_dir=out_dir, pkl_path=info_val_path)
-    update_pkl_infos(info_prefix, out_dir=out_dir, pkl_path=info_test_path)
+    update_pkl_infos('forainetv2', out_dir=out_dir, pkl_path=info_train_path)
+    update_pkl_infos('forainetv2', out_dir=out_dir, pkl_path=info_val_path)
+    update_pkl_infos('forainetv2', out_dir=out_dir, pkl_path=info_test_path)
 
 
 parser = argparse.ArgumentParser(description='Data converter arg parser')

@@ -299,8 +299,13 @@ def main(scan_name, output_dir, iterations):
             print(f"Warning: Bluepoints file {blue_file} not found, skipping.")
         
         
-        offset_path = os.path.join('/workspace/data/ForAINetV2/forainetv2_instance_data', scan_name + '_offsets.npy')
-        offsets = np.load(offset_path)
+        # Use relative path based on current working directory
+        offset_path = os.path.join(os.getcwd(), 'data/ForAINetV2/forainetv2_instance_data', scan_name + '_offsets.npy')
+        if os.path.exists(offset_path):
+            offsets = np.load(offset_path)
+        else:
+            # If offset file doesn't exist, use zero offsets
+            offsets = np.array([0.0, 0.0, 0.0])
         #final_all_points[:, 0] += offsets[0]
         #final_all_points[:, 1] += offsets[1]
         #final_all_points[:, 2] += offsets[2]

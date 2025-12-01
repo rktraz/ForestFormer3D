@@ -139,12 +139,19 @@ def export(ply_file,
 
     points = points.astype(np.float32)
 
-    #semantic_seg = np.ones((points.shape[0],), dtype=np.int64)
+    ####################
+    #labels = pcd["scalar_truth"]
+    #labels[labels == 0] = 3
+    #labels[labels == 1] = 2
+    #pcd["scalar_truth"] = labels
+    #semantic_seg = pcd["scalar_truth"].astype(np.int64)
     #treeID = np.zeros((points.shape[0],), dtype=np.int64)
-    semantic_seg = pcd["semantic_seg"].astype(np.int64)
-    treeID = pcd["treeID"].astype(np.int64)
-    #semantic_seg = pcd["semantic"].astype(np.int64)
-    #treeID = pcd["instance"].astype(np.int64)
+    ######################
+
+    semantic_seg = np.ones((points.shape[0],), dtype=np.int64)
+    treeID = np.zeros((points.shape[0],), dtype=np.int64)
+    #semantic_seg = pcd["semantic_seg"].astype(np.int64)  #start from 1 ground 2 wood 3 leaf
+    #treeID = pcd["treeID"].astype(np.int64)  #instance 0 non-tree >=1 instance id
 
     # test set data doesn't have align_matrix
     axis_align_matrix = np.eye(4)

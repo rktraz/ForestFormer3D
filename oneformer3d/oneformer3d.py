@@ -701,7 +701,9 @@ class ForAINetV2OneFormer3D(Base3DDetector):
         base_name = os.path.basename(lidar_path)
         current_filename = os.path.splitext(base_name)[0]
         #if 'val' in lidar_path:
-        if 'test' in lidar_path:
+        # Always save results for test data - check if eval_ann_info exists (test mode)
+        is_test_mode = hasattr(batch_data_samples[0], 'eval_ann_info') and batch_data_samples[0].eval_ann_info is not None
+        if 'test' in lidar_path or is_test_mode:
             import numpy as np
             from sklearn.neighbors import NearestNeighbors
             from plyfile import PlyData, PlyElement
@@ -2096,7 +2098,9 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
         base_name = os.path.basename(lidar_path)
         current_filename = os.path.splitext(base_name)[0]
         #if 'val' in lidar_path:
-        if 'test' in lidar_path:
+        # Always save results for test data - check if eval_ann_info exists (test mode)
+        is_test_mode = hasattr(batch_data_samples[0], 'eval_ann_info') and batch_data_samples[0].eval_ann_info is not None
+        if 'test' in lidar_path or is_test_mode:
             import numpy as np
             from sklearn.neighbors import NearestNeighbors
             from plyfile import PlyData, PlyElement
@@ -2267,7 +2271,9 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
         #########print(f"load pc: {(t1 - t0)*1000:.0f} ms")
         #is_test = True
         #if is_test:
-        if 'test' in lidar_path:
+        # Always save results for test data - check if eval_ann_info exists (test mode)
+        is_test_mode = hasattr(batch_data_samples[0], 'eval_ann_info') and batch_data_samples[0].eval_ann_info is not None
+        if 'test' in lidar_path or is_test_mode:
             step_size = self.radius/4
             grid_size = 0.2
             num_points = 640000
@@ -2291,7 +2297,14 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
             
             ##########output_path = "work_dirs/bluepoint_th04fixed_03_priority_test_tobedelete"
             #########output_path = "work_dirs/bluepoint_forinstancev2"
-            output_path = self.test_cfg.get('output_dir', 'work_dirs/default_output')
+            # Use relative path - ensure it's not absolute /workspace path
+            default_output = os.path.join(os.getcwd(), 'work_dirs', 'output')
+            output_path = self.test_cfg.get('output_dir', default_output)
+            # Convert to absolute path if relative, but ensure it's in current directory
+            if not os.path.isabs(output_path):
+                output_path = os.path.join(os.getcwd(), output_path)
+            # Ensure output directory exists
+            os.makedirs(output_path, exist_ok=True)
             score_th1 = self.score_th
             score_th2 = 0.3
             t2 = time.time()   
@@ -2569,10 +2582,16 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
             t14 = time.time()                 
             ######print(f"postprocessing 8: {(t14 - t13)*1000:.0f} ms")
             # Save the final combined results
-            region_path = os.path.join(output_path, f"{current_filename}.ply")
+            # Check if we're in an iteration context (for inference script compatibility)
+            # The inference script expects files named like {scan_name}_{iteration}.ply
+            # Check for iteration number from environment or use default
+            iteration = os.environ.get('CURRENT_ITERATION', '1')
+            region_path = os.path.join(output_path, f"{current_filename}_{iteration}.ply")
  
+            # Save main prediction file
             self.save_ply_withscore(original_points.cpu().numpy(), final_semantic_labels, clean_all_pre_ins, merged_instance_scores, region_path, pts_semantic_gt, pts_instance_gt)
-            #self.save_bluepoints(original_points.cpu().numpy(), final_semantic_labels, clean_all_pre_ins, merged_instance_scores, region_path, pts_semantic_gt, pts_instance_gt)
+            # Also save bluepoints file for inference script compatibility
+            self.save_bluepoints(original_points.cpu().numpy(), final_semantic_labels, clean_all_pre_ins, merged_instance_scores, region_path, pts_semantic_gt, pts_instance_gt)
             
             t15 = time.time()                 
             ######print(f"postprocessing 9: {(t15 - t14)*1000:.0f} ms")
@@ -3757,18 +3776,33 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
         from plyfile import PlyData, PlyElement
 
         output_dir = os.path.dirname(filename)
+        # Fix: if path starts with /workspace, replace with current working directory
+        if output_dir.startswith('/workspace'):
+            # Replace /workspace with current working directory
+            cwd = os.getcwd()
+            output_dir = output_dir.replace('/workspace', cwd, 1)
+            filename = filename.replace('/workspace', cwd, 1)
         os.makedirs(output_dir, exist_ok=True)
         
         # Extract base filename and index
-        match = re.search(r'_(\d+)\.ply$', filename)
-        if match:
-            num = int(match.group(1)) + 1
-            base_name = filename[:match.start(1)]
+        # Use iteration from environment variable if available, otherwise extract from filename
+        iteration = os.environ.get('CURRENT_ITERATION', None)
+        if iteration is not None:
+            num = int(iteration)
+            # Extract base name by removing the iteration number and extension
+            match = re.search(r'_(\d+)\.ply$', filename)
+            if match:
+                base_name = filename[:match.start(0)]  # Everything before _X.ply
+            else:
+                base_name = filename.replace('.ply', '')
         else:
-            num = 1
-            base_name = filename.replace('.ply', '')
-            #if not base_name.endswith('_'):
-            #    base_name += '_'
+            match = re.search(r'_(\d+)\.ply$', filename)
+            if match:
+                num = int(match.group(1))
+                base_name = filename[:match.start(0)]  # Everything before _X.ply
+            else:
+                num = 1
+                base_name = filename.replace('.ply', '')
 
         # Ensure "bluepoints" does not get repeated in filename
         if "bluepoints" in base_name:

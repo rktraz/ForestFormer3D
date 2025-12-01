@@ -91,8 +91,16 @@ class UnifiedSegMetric(SegMetric):
             ins_gt_i = eval_ann['pts_instance_mask']
             ins_pre_i = single_pred_results['pts_instance_mask'][1]
 
+            # Ensure all arrays have the same size to avoid index out of bounds
+            min_size = min(sem_gt_i.shape[0], sem_pre_i.shape[0], 
+                          ins_gt_i.shape[0], ins_pre_i.shape[0])
+            sem_gt_i = sem_gt_i[:min_size]
+            sem_pre_i = sem_pre_i[:min_size]
+            ins_gt_i = ins_gt_i[:min_size]
+            ins_pre_i = ins_pre_i[:min_size]
+
             # Semantic Segmentation Evaluation
-            for j in range(sem_gt_i.shape[0]):
+            for j in range(min_size):
                 gt_l, pred_l = int(sem_gt_i[j]), int(sem_pre_i[j])
                 gt_classes_global[gt_l] += 1
                 positive_classes_global[pred_l] += 1
@@ -107,7 +115,9 @@ class UnifiedSegMetric(SegMetric):
             for tc in self.thing_class_inds: sem_gt_bi[sem_gt_i == tc + 1] = 2
             for tc in self.thing_class_inds: sem_pre_bi[sem_pre_i == tc + 1] = 2
 
-            for j in range(sem_gt_bi.shape[0]):
+            # Use minimum size to avoid index out of bounds
+            min_size_bi = min(sem_gt_bi.shape[0], sem_pre_bi.shape[0])
+            for j in range(min_size_bi):
                 gt_l, pred_l = int(sem_gt_bi[j]), int(sem_pre_bi[j])
                 gt_classes_bi_global[gt_l] += 1
                 positive_classes_bi_global[pred_l] += 1

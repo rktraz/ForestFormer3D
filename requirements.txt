@@ -1,0 +1,31 @@
+# Core Deep Learning Framework
+torch==1.13.1
+torchvision==0.14.1
+torchaudio==0.13.1
+torch-scatter==2.1.2
+torch-cluster==1.6.3
+torch-points-kernels==0.7.0
+
+# MMDetection3D Ecosystem
+mmdet==3.0.0
+mmdet3d==1.1.0
+mmengine==0.7.3
+mmcv==2.0.0
+
+# Scientific Computing
+numpy==1.24.1
+scipy==1.15.3
+numba==0.57.0
+
+# 3D Point Cloud Processing
+laspy==2.6.1
+trimesh==3.21.6
+
+# C++ Extension Support
+pybind11==2.10.4
+
+# Additional dependencies (if needed)
+# opencv-python  # Uncomment if needed
+# matplotlib  # Uncomment if needed
+# tqdm  # Usually included with mmengine
+

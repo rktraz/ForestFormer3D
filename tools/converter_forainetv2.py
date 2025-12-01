@@ -37,21 +37,50 @@ def create_info_file(data_path,
         save_path, f'{pkl_prefix}_oneformer3d_infos_test.pkl')
     if pkl_prefix == 'forainetv2':
         # ScanNet has a train-val-test split
-        train_dataset = ForAINetV2Data(root_path=data_path, split='train')
-        val_dataset = ForAINetV2Data(root_path=data_path, split='val')
+        # Check if split files exist and have content
+        train_list_file = os.path.join(data_path, 'meta_data', 'train_list.txt')
+        val_list_file = os.path.join(data_path, 'meta_data', 'val_list.txt')
+        test_list_file = os.path.join(data_path, 'meta_data', 'test_list.txt')
+        
+        # Process train split if it exists and has content
+        if os.path.exists(train_list_file):
+            train_samples = [s.strip() for s in mmengine.list_from_file(train_list_file) if s.strip()]
+            if train_samples:
+                train_dataset = ForAINetV2Data(root_path=data_path, split='train')
+                infos_train = train_dataset.get_infos(
+                    num_workers=workers, has_label=True)
+                mmengine.dump(infos_train, train_filename, 'pkl')
+                print(f'{pkl_prefix} info train file is saved to {train_filename}')
+            else:
+                # Create empty train file
+                mmengine.dump([], train_filename, 'pkl')
+                print(f'{pkl_prefix} info train file is empty, saved to {train_filename}')
+        else:
+            # Create empty train file
+            mmengine.dump([], train_filename, 'pkl')
+            print(f'{pkl_prefix} info train file is empty, saved to {train_filename}')
+        
+        # Process val split if it exists and has content
+        if os.path.exists(val_list_file):
+            val_samples = [s.strip() for s in mmengine.list_from_file(val_list_file) if s.strip()]
+            if val_samples:
+                val_dataset = ForAINetV2Data(root_path=data_path, split='val')
+                infos_val = val_dataset.get_infos(
+                    num_workers=workers, has_label=True)
+                mmengine.dump(infos_val, val_filename, 'pkl')
+                print(f'{pkl_prefix} info val file is saved to {val_filename}')
+            else:
+                # Create empty val file
+                mmengine.dump([], val_filename, 'pkl')
+                print(f'{pkl_prefix} info val file is empty, saved to {val_filename}')
+        else:
+            # Create empty val file
+            mmengine.dump([], val_filename, 'pkl')
+            print(f'{pkl_prefix} info val file is empty, saved to {val_filename}')
+        
+        # Process test split
         test_dataset = ForAINetV2Data(root_path=data_path, split='test')
-    
-    infos_train = train_dataset.get_infos(
-        num_workers=workers, has_label=True)
-    mmengine.dump(infos_train, train_filename, 'pkl')
-    print(f'{pkl_prefix} info train file is saved to {train_filename}')
-
-    infos_val = val_dataset.get_infos(
-        num_workers=workers, has_label=True)
-    mmengine.dump(infos_val, val_filename, 'pkl')
-    print(f'{pkl_prefix} info val file is saved to {val_filename}')
-
-    infos_test = test_dataset.get_infos(
-        num_workers=workers, has_label=True)
-    mmengine.dump(infos_test, test_filename, 'pkl')
-    print(f'{pkl_prefix} info test file is saved to {test_filename}')
+        infos_test = test_dataset.get_infos(
+            num_workers=workers, has_label=True)
+        mmengine.dump(infos_test, test_filename, 'pkl')
+        print(f'{pkl_prefix} info test file is saved to {test_filename}')
