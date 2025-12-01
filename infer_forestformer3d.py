@@ -161,8 +161,6 @@ def setup_conda_env():
 
 def clean_temporary_data():
     """Clean temporary data directories."""
-    logger.info("[Step 0] Cleaning temporary data files...")
-    
     dirs_to_clean = [
         os.path.join(CONFIG.WORK_DIR, "data/ForAINetV2/forainetv2_instance_data"),
         os.path.join(CONFIG.WORK_DIR, "data/ForAINetV2/semantic_mask"),
@@ -183,8 +181,6 @@ def clean_temporary_data():
 
 def generate_test_list(base_name):
     """Generate test_list.txt with the given base name."""
-    logger.info("[Step 1] Generating test_list.txt...")
-    
     os.makedirs(CONFIG.META_DIR, exist_ok=True)
     test_list = os.path.join(CONFIG.META_DIR, "test_list.txt")
     test_list_init = os.path.join(CONFIG.META_DIR, "test_list_initial.txt")
@@ -193,13 +189,9 @@ def generate_test_list(base_name):
         f.write(f"{base_name}\n")
     
     shutil.copy(test_list, test_list_init)
-    logger.info(f"✅ Created test_list.txt with: {base_name}")
 
 def run_preprocessing():
     """Run data preprocessing steps."""
-    logger.info("[Step 2] Running data preprocessing...")
-    
-    # Change to data directory and run batch_load
     data_dir = os.path.join(CONFIG.WORK_DIR, "data/ForAINetV2")
     test_list = os.path.join(CONFIG.META_DIR, "test_list.txt")
     
@@ -212,18 +204,15 @@ def run_preprocessing():
             capture_output=True,
             text=True
         )
-        logger.info("✅ Data loading complete")
         return True
     except subprocess.CalledProcessError as e:
-        logger.error(f"Data loading failed: {e}")
+        logger.error(f"Data preprocessing failed: {e}")
         if e.stderr:
             logger.error(f"Error output: {e.stderr}")
         return False
 
 def create_data_info():
     """Create data info files."""
-    logger.info("[Step 3] Creating data info files...")
-    
     try:
         result = subprocess.run(
             [sys.executable, os.path.join(CONFIG.WORK_DIR, "tools/create_data_forainetv2.py"), "forainetv2"],
@@ -232,7 +221,6 @@ def create_data_info():
             capture_output=True,
             text=True
         )
-        logger.info("✅ Data info files created")
         return True
     except subprocess.CalledProcessError as e:
         logger.error(f"Data info creation failed: {e}")
@@ -242,8 +230,6 @@ def create_data_info():
 
 def run_inference(config_file, model_path, cuda_device="0"):
     """Run ForestFormer3D inference."""
-    logger.info("[Step 4] Running inference...")
-    
     env = os.environ.copy()
     env['PYTHONPATH'] = CONFIG.WORK_DIR + (f":{env.get('PYTHONPATH', '')}" if env.get('PYTHONPATH') else "")
     env['OMP_NUM_THREADS'] = '8'
@@ -259,7 +245,6 @@ def run_inference(config_file, model_path, cuda_device="0"):
             capture_output=True,
             text=True
         )
-        logger.info("✅ Inference complete")
         return True
     except subprocess.CalledProcessError as e:
         logger.error(f"Inference failed: {e}")
@@ -267,13 +252,12 @@ def run_inference(config_file, model_path, cuda_device="0"):
             logger.error(f"Error output: {e.stderr}")
         return False
 
-def copy_final_predictions(base_name, intermediate_output_dir, final_output_dir):
+def copy_final_predictions(base_name, original_input_file, intermediate_output_dir, final_output_dir):
     """
-    Copy final prediction file from intermediate output to final output directory.
-    Skips merge step for semantic segmentation - uses raw _1.ply file directly.
-    Applies coordinate offsets to restore original coordinate system.
+    Add prediction fields to the original point cloud and save.
+    Preserves all original fields and coordinates - just adds semantic_pred, instance_pred, score.
     """
-    # Look for the raw output file
+    # Look for the raw output file with predictions
     pred_file = os.path.join(intermediate_output_dir, f"{base_name}_1.ply")
     
     if not os.path.exists(pred_file):
@@ -284,62 +268,73 @@ def copy_final_predictions(base_name, intermediate_output_dir, final_output_dir)
             logger.info(f"Found: {alt_files[:5]}")
         return False
     
-    # Load offsets to restore original coordinates
-    offset_file = os.path.join(CONFIG.WORK_DIR, 'data/ForAINetV2/forainetv2_instance_data', f'{base_name}_offsets.npy')
-    offsets = None
-    if os.path.exists(offset_file):
-        try:
-            import numpy as np
-            offsets = np.load(offset_file)
-            logger.info(f"Found coordinate offsets: {offsets}")
-        except Exception as e:
-            logger.warning(f"Could not load offsets: {e}")
-    
     # Create final output filename
     final_filename = f"{base_name}_classified_by_ff3d.ply"
     final_output_path = os.path.join(final_output_dir, final_filename)
     
     try:
-        # Load PLY file
         from plyfile import PlyData, PlyElement
+        import numpy as np
         
-        ply_data = PlyData.read(pred_file)
-        vertex = ply_data['vertex'].data
+        # Load original input file (has correct coordinates and all original fields)
+        # If it's LAS, we need to convert it to PLY first for reading
+        file_ext = os.path.splitext(original_input_file)[1].lower()
+        if file_ext in ['.las', '.laz']:
+            # Use the converted PLY file that was used for processing (has correct coordinates)
+            original_ply_file = os.path.join(CONFIG.TEST_DATA_DIR, f"{base_name}.ply")
+            if not os.path.exists(original_ply_file):
+                logger.error(f"Converted PLY file not found: {original_ply_file}")
+                return False
+        else:
+            original_ply_file = original_input_file
         
-        # Extract coordinates
-        points = np.vstack((vertex['x'], vertex['y'], vertex['z'])).transpose()
+        original_ply = PlyData.read(original_ply_file)
+        original_vertex = original_ply['vertex'].data
         
-        # Apply offsets to restore original coordinate system
-        if offsets is not None:
-            logger.info("Applying coordinate offsets to restore original coordinate system...")
-            points[:, 0] += offsets[0]
-            points[:, 1] += offsets[1]
-            points[:, 2] += offsets[2]
+        # Load prediction file (has predictions but wrong coordinates)
+        pred_ply = PlyData.read(pred_file)
+        pred_vertex = pred_ply['vertex'].data
         
-        # Create new vertex data with corrected coordinates
-        dtype_list = [('x', 'f8'), ('y', 'f8'), ('z', 'f8')]
-        field_data = {
-            'x': points[:, 0],
-            'y': points[:, 1],
-            'z': points[:, 2]
-        }
+        # Verify point counts match
+        if len(original_vertex) != len(pred_vertex):
+            logger.error(f"Point count mismatch: original={len(original_vertex)}, prediction={len(pred_vertex)}")
+            return False
         
-        # Add all other fields from original file
-        for field_name in vertex.dtype.names:
-            if field_name not in ['x', 'y', 'z']:
-                dtype_list.append((field_name, vertex.dtype[field_name]))
-                field_data[field_name] = vertex[field_name]
+        # Extract prediction fields
+        semantic_pred = pred_vertex['semantic_pred']
+        instance_pred = pred_vertex['instance_pred'] if 'instance_pred' in pred_vertex.dtype.names else None
+        score = pred_vertex['score'] if 'score' in pred_vertex.dtype.names else None
         
-        # Create structured array
-        vertex_data = np.empty(len(points), dtype=dtype_list)
-        for field_name, field_values in field_data.items():
-            vertex_data[field_name] = field_values
+        # Create new dtype list starting with original fields
+        dtype_list = list(original_vertex.dtype.descr)
         
-        # Write PLY file with corrected coordinates
+        # Add prediction fields if not already present
+        if 'semantic_pred' not in original_vertex.dtype.names:
+            dtype_list.append(('semantic_pred', '<i4'))
+        if instance_pred is not None and 'instance_pred' not in original_vertex.dtype.names:
+            dtype_list.append(('instance_pred', '<i4'))
+        if score is not None and 'score' not in original_vertex.dtype.names:
+            dtype_list.append(('score', '<f4'))
+        
+        # Create new structured array with original data + predictions
+        vertex_data = np.empty(len(original_vertex), dtype=dtype_list)
+        
+        # Copy all original fields
+        for field_name in original_vertex.dtype.names:
+            vertex_data[field_name] = original_vertex[field_name]
+        
+        # Add prediction fields
+        vertex_data['semantic_pred'] = semantic_pred
+        if instance_pred is not None:
+            vertex_data['instance_pred'] = instance_pred
+        if score is not None:
+            vertex_data['score'] = score
+        
+        # Write PLY file (preserves original structure + adds predictions)
         el = PlyElement.describe(vertex_data, 'vertex')
         PlyData([el], text=False).write(final_output_path)
         
-        logger.info(f"✅ Saved final prediction with corrected coordinates to: {final_output_path}")
+        logger.info(f"  Saved: {os.path.basename(final_output_path)}")
         return True
     except Exception as e:
         logger.error(f"Failed to process prediction file: {e}")
@@ -367,23 +362,27 @@ def process_single_file(input_file, intermediate_output_dir, final_output_dir, m
     file_ext = os.path.splitext(input_file)[1].lower()
     base_name = os.path.splitext(os.path.basename(input_file))[0]
     
-    logger.info(f"\n{'='*60}")
     logger.info(f"Processing: {os.path.basename(input_file)}")
-    logger.info(f"{'='*60}")
     
-    # Convert LAS/LAZ to PLY if needed
+    # Store original input file path (we'll use it later to preserve original coordinates)
+    original_input_file = input_file
+    
+    # Convert LAS/LAZ to PLY if needed for processing
     os.makedirs(CONFIG.TEST_DATA_DIR, exist_ok=True)
     
     if file_ext in ['.las', '.laz']:
         ply_file = os.path.join(CONFIG.TEST_DATA_DIR, f"{base_name}.ply")
+        logger.info(f"  Converting to PLY...")
         if not convert_las_to_ply(input_file, ply_file):
             logger.error(f"Failed to convert {input_file}")
             return False
+        # Use original LAS file for final output (has correct coordinates)
+        original_input_file = input_file
     elif file_ext == '.ply':
         ply_file = os.path.join(CONFIG.TEST_DATA_DIR, f"{base_name}.ply")
-        logger.info(f"Copying PLY file to test_data directory...")
         shutil.copy2(input_file, ply_file)
-        logger.info(f"✅ Copied to: {ply_file}")
+        # Use original PLY file for final output
+        original_input_file = input_file
     else:
         logger.error(f"Unsupported file format: {file_ext}")
         return False
@@ -403,23 +402,18 @@ def process_single_file(input_file, intermediate_output_dir, final_output_dir, m
         return False
     
     # Run inference
+    logger.info(f"  Running inference...")
     if not run_inference(config_file, model_path, cuda_device):
         return False
     
-    # Copy final prediction (skip merge step for semantic segmentation)
-    if not copy_final_predictions(base_name, intermediate_output_dir, final_output_dir):
-        logger.warning(f"Failed to copy final prediction for {base_name}")
+    # Add predictions to original point cloud (skip merge step for semantic segmentation)
+    if not copy_final_predictions(base_name, original_input_file, intermediate_output_dir, final_output_dir):
+        logger.error(f"Failed to add predictions to original point cloud for {base_name}")
         return False
     
     # Clean up intermediate files if requested
     if not keep_intermediate:
-        logger.info("Cleaning up intermediate files...")
         cleanup_intermediate_files(base_name, intermediate_output_dir)
-    
-    # Print results
-    final_output_file = os.path.join(final_output_dir, f"{base_name}_classified_by_ff3d.ply")
-    logger.info(f"\n✅ Inference complete for {base_name}!")
-    logger.info(f"Final output: {final_output_file}")
     
     return True
 
@@ -504,7 +498,6 @@ def run_inference_on_files(input_files, model_path=None, config_file=None, outpu
     
     # Find model checkpoint
     model_path = find_model_checkpoint(model_path)
-    logger.info(f"Using model checkpoint: {model_path}")
     
     # Get config file
     if config_file is None:
@@ -523,11 +516,11 @@ def run_inference_on_files(input_files, model_path=None, config_file=None, outpu
     
     output_dir = os.path.abspath(output_dir)
     os.makedirs(output_dir, exist_ok=True)
-    logger.info(f"Final output: {output_dir}")
     
     # Process each file
     for i, input_file in enumerate(input_files, 1):
-        logger.info(f"\n[{i}/{len(input_files)}] Processing file...")
+        if len(input_files) > 1:
+            logger.info(f"[{i}/{len(input_files)}]")
         
         if not process_single_file(
             input_file, 
@@ -539,9 +532,6 @@ def run_inference_on_files(input_files, model_path=None, config_file=None, outpu
             keep_intermediate=keep_intermediate
         ):
             raise RuntimeError(f"Inference failed for file: {input_file}")
-    
-    logger.info(f"\n✅ Inference complete for {len(input_files)} file(s)")
-    logger.info(f"Results saved to: {output_dir}")
     
     return output_dir
 
@@ -611,15 +601,6 @@ Examples:
     # Change to work directory
     os.chdir(CONFIG.WORK_DIR)
     
-    args = parser.parse_args()
-    
-    # Set logging level
-    if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
-    
-    # Change to work directory
-    os.chdir(CONFIG.WORK_DIR)
-    
     # Collect input files
     input_files = collect_input_files(args.input)
     
@@ -630,6 +611,16 @@ Examples:
     logger.info(f"Found {len(input_files)} file(s) to process:")
     for f in input_files:
         logger.info(f"  - {f}")
+    
+    # Determine output directory for display
+    if args.output:
+        display_output = os.path.abspath(args.output)
+    else:
+        display_output = "inference_runs/run_TIMESTAMP"
+    
+    logger.info(f"Using model checkpoint: {find_model_checkpoint(args.model)}")
+    logger.info(f"Output: {display_output}")
+    logger.info("")
     
     try:
         # Run inference
@@ -642,10 +633,8 @@ Examples:
             keep_intermediate=args.keep_intermediate_files
         )
         
-        logger.info(f"\n{'='*60}")
-        logger.info(f"Processing complete!")
-        logger.info(f"  Final results: {output_dir}")
-        logger.info(f"{'='*60}")
+        logger.info("")
+        logger.info(f"✅ Inference complete. Results: {output_dir}")
     except Exception as e:
         logger.error(f"Inference failed: {e}")
         import traceback
