@@ -21,6 +21,7 @@ import logging
 import argparse
 from pathlib import Path
 from datetime import datetime
+from scipy.spatial import cKDTree
 
 # Setup logging
 logging.basicConfig(
@@ -29,6 +30,26 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
+
+#####################################################################
+# HELPER FUNCTIONS
+#####################################################################
+
+def rel_path(path):
+    """
+    Convert an absolute path to a relative path (relative to project root).
+    If path is already relative or outside project root, return as-is.
+    """
+    if not path:
+        return path
+    try:
+        project_root = os.path.dirname(os.path.abspath(__file__))
+        abs_path = os.path.abspath(path)
+        if abs_path.startswith(project_root):
+            return os.path.relpath(abs_path, project_root)
+        return path
+    except:
+        return path
 
 #####################################################################
 # CONFIGURATION
@@ -142,7 +163,7 @@ def convert_las_to_ply(input_file, output_file):
             text=True,
             check=True
         )
-        logger.info(f"✅ Converted to: {output_file}")
+        logger.info(f"✅ Converted to: {rel_path(output_file)}")
         if result.stdout:
             logger.debug(result.stdout)
         return True
@@ -252,14 +273,16 @@ def run_inference(config_file, model_path, cuda_device="0"):
             logger.error(f"Error output: {e.stderr}")
         return False
 
-def copy_final_predictions(base_name, original_input_file, intermediate_output_dir, final_output_dir):
+def copy_final_predictions(base_name, original_input_file, intermediate_output_dir, final_output_dir, tolerance=0.01):
     """
-    Add prediction fields to the original point cloud and save.
-    Preserves all original fields and coordinates - just adds semantic_pred, instance_pred, score.
+    Match ForestFormer3D prediction points to the original point cloud using spatial KDTree
+    and save a new PLY containing ONLY matched points, with original coordinates and
+    all original fields plus semantic_pred / instance_pred / score.
+    
+    Unmatched original points are dropped.
     """
     # Look for the raw output file with predictions
     pred_file = os.path.join(intermediate_output_dir, f"{base_name}_1.ply")
-    
     if not os.path.exists(pred_file):
         logger.warning(f"Output file not found at {pred_file}")
         logger.info("Checking for alternative output locations...")
@@ -267,73 +290,129 @@ def copy_final_predictions(base_name, original_input_file, intermediate_output_d
         if alt_files:
             logger.info(f"Found: {alt_files[:5]}")
         return False
-    
+
+    # Load offsets (used by preprocessing) so we can center original coords to model space
+    offset_file = os.path.join(
+        CONFIG.WORK_DIR,
+        "data/ForAINetV2/forainetv2_instance_data",
+        f"{base_name}_offsets.npy",
+    )
+    offsets = None
+    if os.path.exists(offset_file):
+        try:
+            import numpy as np
+
+            offsets = np.load(offset_file)
+            logger.info(f"Found coordinate offsets: {offsets}")
+        except Exception as e:
+            logger.warning(f"Could not load offsets: {e}")
+
     # Create final output filename
     final_filename = f"{base_name}_classified_by_ff3d.ply"
     final_output_path = os.path.join(final_output_dir, final_filename)
-    
+
     try:
         from plyfile import PlyData, PlyElement
         import numpy as np
-        
-        # Load original input file (has correct coordinates and all original fields)
-        # If it's LAS, we need to convert it to PLY first for reading
+
+        # 1) Load original point cloud (world coordinates, all fields)
         file_ext = os.path.splitext(original_input_file)[1].lower()
-        if file_ext in ['.las', '.laz']:
-            # Use the converted PLY file that was used for processing (has correct coordinates)
+        if file_ext in [".las", ".laz"]:
+            # Use the converted PLY that was used for preprocessing
             original_ply_file = os.path.join(CONFIG.TEST_DATA_DIR, f"{base_name}.ply")
             if not os.path.exists(original_ply_file):
                 logger.error(f"Converted PLY file not found: {original_ply_file}")
                 return False
         else:
             original_ply_file = original_input_file
-        
+
         original_ply = PlyData.read(original_ply_file)
-        original_vertex = original_ply['vertex'].data
-        
-        # Load prediction file (has predictions but wrong coordinates)
+        original_vertex = original_ply["vertex"].data
+        orig_x = np.asarray(original_vertex["x"], dtype=np.float64)
+        orig_y = np.asarray(original_vertex["y"], dtype=np.float64)
+        orig_z = np.asarray(original_vertex["z"], dtype=np.float64)
+        orig_points = np.stack([orig_x, orig_y, orig_z], axis=1)  # world coords
+
+        # 2) Load prediction points (model coords, centered by offsets)
         pred_ply = PlyData.read(pred_file)
-        pred_vertex = pred_ply['vertex'].data
-        
-        # Verify point counts match
-        if len(original_vertex) != len(pred_vertex):
-            logger.error(f"Point count mismatch: original={len(original_vertex)}, prediction={len(pred_vertex)}")
+        pred_vertex = pred_ply["vertex"].data
+        pred_x = np.asarray(pred_vertex["x"], dtype=np.float64)
+        pred_y = np.asarray(pred_vertex["y"], dtype=np.float64)
+        pred_z = np.asarray(pred_vertex["z"], dtype=np.float64)
+        pred_points = np.stack([pred_x, pred_y, pred_z], axis=1)
+
+        # 3) Build KDTree in the same coordinate system as predictions
+        if offsets is not None:
+            # Center original points using the same offsets that preprocessing used
+            orig_centered = orig_points.copy()
+            orig_centered[:, 0] -= offsets[0]
+            orig_centered[:, 1] -= offsets[1]
+            orig_centered[:, 2] -= offsets[2]
+        else:
+            # Fallback: assume predictions are already in world coordinates
+            orig_centered = orig_points
+
+        logger.info(f"  Building KDTree for {len(original_vertex)} original points...")
+        tree = cKDTree(orig_centered)
+
+        # 4) Match each prediction point to the nearest original point
+        logger.info(f"  Matching {len(pred_vertex)} prediction points (tolerance={tolerance}m)...")
+        distances, indices = tree.query(pred_points, k=1)
+        matched_mask = distances <= tolerance
+        num_matched = int(np.sum(matched_mask))
+        num_total = len(pred_vertex)
+
+        if num_matched == 0:
+            logger.error("No prediction points matched to the original cloud within tolerance.")
             return False
-        
-        # Extract prediction fields
-        semantic_pred = pred_vertex['semantic_pred']
-        instance_pred = pred_vertex['instance_pred'] if 'instance_pred' in pred_vertex.dtype.names else None
-        score = pred_vertex['score'] if 'score' in pred_vertex.dtype.names else None
-        
+
+        logger.info(f"  Matched {num_matched}/{num_total} prediction points to original cloud")
+
+        # 5) Build new vertex array using ONLY matched original points
+        matched_orig_indices = indices[matched_mask]
+
+        # Extract prediction fields (filtered to matched points)
+        semantic_pred = pred_vertex["semantic_pred"][matched_mask]
+        instance_pred = (
+            pred_vertex["instance_pred"][matched_mask]
+            if "instance_pred" in pred_vertex.dtype.names
+            else None
+        )
+        score = (
+            pred_vertex["score"][matched_mask]
+            if "score" in pred_vertex.dtype.names
+            else None
+        )
+
         # Create new dtype list starting with original fields
         dtype_list = list(original_vertex.dtype.descr)
-        
+
         # Add prediction fields if not already present
-        if 'semantic_pred' not in original_vertex.dtype.names:
-            dtype_list.append(('semantic_pred', '<i4'))
-        if instance_pred is not None and 'instance_pred' not in original_vertex.dtype.names:
-            dtype_list.append(('instance_pred', '<i4'))
-        if score is not None and 'score' not in original_vertex.dtype.names:
-            dtype_list.append(('score', '<f4'))
-        
-        # Create new structured array with original data + predictions
-        vertex_data = np.empty(len(original_vertex), dtype=dtype_list)
-        
-        # Copy all original fields
+        if "semantic_pred" not in original_vertex.dtype.names:
+            dtype_list.append(("semantic_pred", "<i4"))
+        if instance_pred is not None and "instance_pred" not in original_vertex.dtype.names:
+            dtype_list.append(("instance_pred", "<i4"))
+        if score is not None and "score" not in original_vertex.dtype.names:
+            dtype_list.append(("score", "<f4"))
+
+        # Create new structured array with matched original data + predictions
+        vertex_data = np.empty(num_matched, dtype=dtype_list)
+
+        # Copy original fields for matched points
         for field_name in original_vertex.dtype.names:
-            vertex_data[field_name] = original_vertex[field_name]
-        
+            vertex_data[field_name] = original_vertex[field_name][matched_orig_indices]
+
         # Add prediction fields
-        vertex_data['semantic_pred'] = semantic_pred
+        vertex_data["semantic_pred"] = semantic_pred
         if instance_pred is not None:
-            vertex_data['instance_pred'] = instance_pred
+            vertex_data["instance_pred"] = instance_pred
         if score is not None:
-            vertex_data['score'] = score
-        
-        # Write PLY file (preserves original structure + adds predictions)
-        el = PlyElement.describe(vertex_data, 'vertex')
+            vertex_data["score"] = score
+
+        # 6) Write PLY file (world coordinates, matched subset only)
+        el = PlyElement.describe(vertex_data, "vertex")
         PlyData([el], text=False).write(final_output_path)
-        
+
         logger.info(f"  Saved: {os.path.basename(final_output_path)}")
         return True
     except Exception as e:
@@ -364,9 +443,6 @@ def process_single_file(input_file, intermediate_output_dir, final_output_dir, m
     
     logger.info(f"Processing: {os.path.basename(input_file)}")
     
-    # Store original input file path (we'll use it later to preserve original coordinates)
-    original_input_file = input_file
-    
     # Convert LAS/LAZ to PLY if needed for processing
     os.makedirs(CONFIG.TEST_DATA_DIR, exist_ok=True)
     
@@ -376,13 +452,9 @@ def process_single_file(input_file, intermediate_output_dir, final_output_dir, m
         if not convert_las_to_ply(input_file, ply_file):
             logger.error(f"Failed to convert {input_file}")
             return False
-        # Use original LAS file for final output (has correct coordinates)
-        original_input_file = input_file
     elif file_ext == '.ply':
         ply_file = os.path.join(CONFIG.TEST_DATA_DIR, f"{base_name}.ply")
         shutil.copy2(input_file, ply_file)
-        # Use original PLY file for final output
-        original_input_file = input_file
     else:
         logger.error(f"Unsupported file format: {file_ext}")
         return False
@@ -406,9 +478,9 @@ def process_single_file(input_file, intermediate_output_dir, final_output_dir, m
     if not run_inference(config_file, model_path, cuda_device):
         return False
     
-    # Add predictions to original point cloud (skip merge step for semantic segmentation)
-    if not copy_final_predictions(base_name, original_input_file, intermediate_output_dir, final_output_dir):
-        logger.error(f"Failed to add predictions to original point cloud for {base_name}")
+    # Save prediction file by matching predictions back to original point cloud
+    if not copy_final_predictions(base_name, input_file, intermediate_output_dir, final_output_dir):
+        logger.error(f"Failed to save final prediction for {base_name}")
         return False
     
     # Clean up intermediate files if requested
@@ -634,7 +706,7 @@ Examples:
         )
         
         logger.info("")
-        logger.info(f"✅ Inference complete. Results: {output_dir}")
+        logger.info(f"✅ Inference complete. Results: {rel_path(output_dir)}")
     except Exception as e:
         logger.error(f"Inference failed: {e}")
         import traceback

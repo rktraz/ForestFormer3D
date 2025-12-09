@@ -37,6 +37,26 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+#####################################################################
+# HELPER FUNCTIONS
+#####################################################################
+
+def rel_path(path):
+    """
+    Convert an absolute path to a relative path (relative to project root).
+    If path is already relative or outside project root, return as-is.
+    """
+    if not path:
+        return path
+    try:
+        project_root = os.path.dirname(os.path.abspath(__file__))
+        abs_path = os.path.abspath(path)
+        if abs_path.startswith(project_root):
+            return os.path.relpath(abs_path, project_root)
+        return path
+    except:
+        return path
+
 # Import data loading and metrics functions from tools
 tools_dir = os.path.join(os.path.dirname(__file__), 'tools')
 if tools_dir not in sys.path:
@@ -151,7 +171,7 @@ def load_forestformer3d_prediction(ply_path):
         return points, semantic_pred
         
     except Exception as e:
-        logger.error(f"Error loading ForestFormer3D prediction from {ply_path}: {str(e)}")
+        logger.error(f"Error loading ForestFormer3D prediction from {rel_path(ply_path)}: {str(e)}")
         raise
 
 def map_forestformer3d_labels(semantic_pred):
@@ -317,7 +337,7 @@ def evaluate_file(pred_ply_path, gt_file_path, output_dir=None, save_classified_
             vertex = np.array([tuple(matched_points[i]) + (predictions[i],) for i in range(len(matched_points))], dtype=dtype)
             el = PlyElement.describe(vertex, 'vertex')
             PlyData([el], text=False).write(output_file)
-            logger.info(f"Saved classified cloud to: {output_file}")
+            logger.info(f"Saved classified cloud to: {rel_path(output_file)}")
         
         return {
             'pred_file': pred_ply_path,
@@ -337,7 +357,7 @@ def evaluate_file(pred_ply_path, gt_file_path, output_dir=None, save_classified_
         }
         
     except Exception as e:
-        logger.error(f"Error evaluating file {pred_ply_path}: {str(e)}")
+        logger.error(f"Error evaluating file {rel_path(pred_ply_path)}: {str(e)}")
         logger.error(traceback.format_exc())
         return None
 
@@ -478,7 +498,7 @@ def generate_evaluation_report(results, model_checkpoint, output_dir, runtime_se
             f.write(f"- Accuracy: {result['metrics']['accuracy']:.4f}\n")
             f.write("\n")
     
-    logger.info(f"Evaluation report saved to: {report_path}")
+    logger.info(f"Evaluation report saved to: {rel_path(report_path)}")
     return report_path
 
 #####################################################################
@@ -538,10 +558,10 @@ def main():
     if CONFIG.USE_TIMESTAMPED_RUNS:
         # Look for files in inference_runs/run_*/ directories
         pred_output_dir = os.path.join(CONFIG.WORK_DIR, CONFIG.PREDICTION_OUTPUT_DIR)
-        logger.info(f"Searching for predictions in: {pred_output_dir}")
+        logger.info(f"Searching for predictions in: {rel_path(pred_output_dir)}")
     else:
         pred_output_dir = os.path.join(CONFIG.WORK_DIR, CONFIG.PREDICTION_OUTPUT_DIR)
-        logger.info(f"Using prediction directory: {pred_output_dir}")
+        logger.info(f"Using prediction directory: {rel_path(pred_output_dir)}")
     
     # Get evaluation files from CONFIG
     evaluation_files = CONFIG.EVALUATION_FILES
@@ -554,7 +574,7 @@ def main():
     valid_evaluation_files = []
     for gt_file_path in evaluation_files:
         if not os.path.exists(gt_file_path):
-            logger.warning(f"Ground truth file not found: {gt_file_path}. Skipping.")
+            logger.warning(f"Ground truth file not found: {rel_path(gt_file_path)}. Skipping.")
             continue
         valid_evaluation_files.append(gt_file_path)
     
@@ -600,7 +620,7 @@ def main():
                 cuda_device=args.cuda_device,
                 keep_intermediate=False
             )
-            logger.info(f"Inference complete. Predictions saved to: {inference_output_dir}")
+            logger.info(f"Inference complete. Predictions saved to: {rel_path(inference_output_dir)}")
         except Exception as e:
             logger.error(f"Inference failed: {e}")
             import traceback
@@ -699,7 +719,7 @@ def main():
         wandb.finish()
         
         logger.info(f"Evaluation complete in {runtime_seconds:.2f} seconds")
-        logger.info(f"Results saved to: {output_dir}")
+        logger.info(f"Results saved to: {rel_path(output_dir)}")
     else:
         logger.error("No successful evaluations")
 

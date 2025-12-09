@@ -7,8 +7,11 @@ __pycache__/
 # Ignore output directories and training artifacts
 work_dirs/
 test_files/
+test_input_dir/
+test_output_dir/
 wandb/
 inference_runs/
+evaluation_files/
 
 # Ignore model checkpoints and weights
 *.pth
