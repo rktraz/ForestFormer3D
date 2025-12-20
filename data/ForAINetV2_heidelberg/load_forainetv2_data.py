@@ -190,16 +190,18 @@ def export(ply_file,
     ######################
 
     # Read semantic_seg and treeID from PLY file
-    # Our standardized files use 1-indexed: 1=wood, 2=leaf (no ground)
-    # Keep as-is (1=wood, 2=leaf)
+    # Standardize to 0-indexed: 0=wood, 1=leaf (no ground)
+    # Input files may be 1-indexed (1=wood, 2=leaf), convert to 0-indexed
     if "semantic_seg" in pcd.dtype.names:
         semantic_seg = pcd["semantic_seg"].astype(np.int64)
-        # Already 1-indexed (1=wood, 2=leaf), no conversion needed
-        # Note: If files have 0-indexed (0=wood, 1=leaf), uncomment below:
-        # semantic_seg = semantic_seg + 1  # Convert to 1-indexed
+        # Convert from 1-indexed (1=wood, 2=leaf) to 0-indexed (0=wood, 1=leaf)
+        # If already 0-indexed, this will create invalid labels, so check first
+        if semantic_seg.min() >= 1:  # 1-indexed input
+            semantic_seg = semantic_seg - 1  # Convert to 0-indexed: 1->0, 2->1
+        # Now semantic_seg is 0-indexed: 0=wood, 1=leaf
     else:
-        # Fallback: all wood (class 1)
-        semantic_seg = np.ones((points.shape[0],), dtype=np.int64)
+        # Fallback: all wood (class 0)
+        semantic_seg = np.zeros((points.shape[0],), dtype=np.int64)
     
     if "treeID" in pcd.dtype.names:
         treeID = pcd["treeID"].astype(np.int64)
@@ -223,10 +225,10 @@ def export(ply_file,
     # Load semantic and instance labels
     if not test_mode:
         # semantic label
-        # Our data: semantic_seg = [1, 2] (1=wood, 2=leaf, no ground)
-        # Keep as-is (1-indexed), no conversion needed
+        # Our data: semantic_seg is now 0-indexed (0=wood, 1=leaf, no ground)
+        # Already converted to 0-indexed above
         bg_sem=np.array([])  # No background/ground class
-        label_ids = semantic_seg  # Keep 1-indexed: 1=wood, 2=leaf
+        label_ids = semantic_seg  # 0-indexed: 0=wood, 1=leaf
         instance_ids = treeID  # 0: unannotated
 
         # Set instance_ids of background points to -1

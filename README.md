@@ -20,14 +20,16 @@ cd /home/rkaharly/ForestFormer3D
 
 ### Run Inference
 ```bash
-# Single file
-python infer_forestformer3d.py --input test_files/256_leafon.ply
+# Single file (model path required)
+python infer_forestformer3d.py --input test_files/256_leafon.ply --model work_dirs/heidelberg_features/epoch_500.pth
 
 # Multiple files or directory
-python infer_forestformer3d.py --input file1.ply file2.las test_files/
+python infer_forestformer3d.py --input file1.ply file2.las test_files/ --model work_dirs/heidelberg_features/epoch_500.pth
 ```
 
-Output: `work_dirs/output/round_1/<filename>_round1.ply`
+**Note:** The `--model` argument is **required**. Specify the path to your trained model checkpoint.
+
+Output: `inference_runs/run_TIMESTAMP/<filename>_classified_by_ff3d.ply`
 
 ### Run Evaluation
 1. Edit `evaluate_forestformer3d.py`, add files to `CONFIG.EVALUATION_FILES`:
@@ -58,16 +60,17 @@ python infer_forestformer3d.py --input <file_or_dir> [options]
 
 **Options:**
 - `--input`: Input file(s) or directory (required)
-- `--output`: Output directory (default: `work_dirs/output`)
-- `--model`: Model checkpoint path (default: auto-detect)
-- `--config`: Config file path (default: `configs/oneformer3d_qs_radius16_qp300_2many.py`)
+- `--model`: Model checkpoint path (REQUIRED)
+- `--output`: Output directory (default: `inference_runs/run_TIMESTAMP`)
+- `--config`: Config file path (default: auto-detected based on model)
 - `--cuda-device`: GPU ID (default: 0)
+- `--keep-intermediate-files`: Keep intermediate files (default: False)
 - `--verbose`: Detailed logging
 
 **Examples:**
 ```bash
-python infer_forestformer3d.py --input test_files/256_leafon.las
-python infer_forestformer3d.py --input file1.ply file2.las --output my_results/
+python infer_forestformer3d.py --input test_files/256_leafon.las --model work_dirs/heidelberg_features/epoch_500.pth
+python infer_forestformer3d.py --input file1.ply file2.las --model work_dirs/heidelberg_features/epoch_500.pth --output my_results/
 ```
 
 ### `evaluate_forestformer3d.py` - Evaluation
@@ -112,11 +115,15 @@ python tools/convert_las_to_ply.py input.las output.ply
 
 **Input (Inference):**
 - `.ply`, `.las`, `.laz`
+- Files are automatically standardized (field names normalized) with caching
+- Cache location: `work_dirs/standardized_cache/`
+- Cache is automatically invalidated when source files change
 
 **Output (Inference):**
 - `.ply` with `semantic_pred` field:
-  - `0` or `1` = branch
-  - `2` = leaf
+  - `0` = wood (for scanner features model)
+  - `1` = leaf (for scanner features model)
+  - Legacy model: `0` or `1` = branch, `2` = leaf
 
 **Ground Truth (Evaluation):**
 - `.ply` with `scalar_Classification` or `classification` field (0=branch, 1=leaf)
@@ -125,8 +132,14 @@ python tools/convert_las_to_ply.py input.las output.ply
 ## Output Locations
 
 **Inference:**
-- Raw: `work_dirs/output/round_1/<filename>_round1.ply`
-- Filtered: `work_dirs/output/round_1_after_remove_noise_200/<filename>_round1.ply`
+- Final predictions: `inference_runs/run_TIMESTAMP/<filename>_classified_by_ff3d.ply`
+- Intermediate files: `work_dirs/output/` (cleaned up by default)
+
+**Standardization Cache:**
+- Location: `work_dirs/standardized_cache/`
+- Format: `{filename}_{hash}.ply`
+- Automatically created and reused for faster subsequent runs
+- Clear cache: `rm -rf work_dirs/standardized_cache/`
 
 **Evaluation:**
 - Report: `evaluation_results_forestformer3d/evaluation_TIMESTAMP/evaluation_report.txt`
@@ -160,7 +173,9 @@ Logged metrics include:
 
 ## Notes
 
+- **Model path is required** for inference (no default model)
+- Files are automatically standardized with caching for consistent field names
 - Model expects PLY format; LAS/LAZ are auto-converted
 - Evaluation uses spatial matching (KDTree) to align prediction and ground truth points
-- Default model: `work_dirs/clean_forestformer/epoch_3000_fix.pth`
+- Standardization cache speeds up repeated runs on the same files
 

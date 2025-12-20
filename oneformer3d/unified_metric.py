@@ -65,10 +65,12 @@ class UnifiedSegMetric(SegMetric):
         logger: MMLogger = MMLogger.get_current_instance()
 
         # These are specific to ForAINetV2 evaluation script
-        NUM_CLASSES_BINARY = 3  # unclassified, non-tree, tree
-        NUM_CLASSES_SEM = 4 # 0:unclassified, 1:ground, 2:wood, 3:leaf
-        INS_CLASS_IDS = [2]  # Instance class is 'wood'/'leaf' which maps to binary 'tree' (2)
-        STUFF_CLASS_IDS = [1] # Stuff class is 'ground' which maps to binary 'non-tree' (1)
+        # We only have wood and leaf (no ground, no unclassified)
+        NUM_CLASSES_BINARY = 3  # 0:unclassified, 1:non-tree, 2:tree
+        NUM_CLASSES_SEM = 2  # 0:wood, 1:leaf (simple, no unclassified)
+        # INS_CLASS_IDS refers to binary array indices: 0=unclassified, 1=non-tree, 2=tree
+        # Both wood and leaf map to binary "tree" (2)
+        INS_CLASS_IDS = [2]  # Binary "tree" class (both wood and leaf map here)
 
         # Global accumulators
         true_positive_classes_global = np.zeros(NUM_CLASSES_SEM)
@@ -85,11 +87,30 @@ class UnifiedSegMetric(SegMetric):
         all_mean_weighted_cov_global = [[] for _ in range(NUM_CLASSES_BINARY)]
 
         for eval_ann, single_pred_results in results:
-            # Get GT and Pred labels, and shift them by 1 (0 is ignored)
-            sem_gt_i = eval_ann['pts_semantic_mask'] + 1
-            sem_pre_i = single_pred_results['pts_semantic_mask'][1] + 1
+            # Get GT and Pred labels
+            # IMPORTANT: GT might still be 1-indexed from .pkl files, convert to 0-indexed
+            sem_gt_i = eval_ann['pts_semantic_mask'].copy()
+            # Convert GT from 1-indexed (1=wood, 2=leaf) to 0-indexed (0=wood, 1=leaf) if needed
+            if sem_gt_i.min() >= 1:  # GT is 1-indexed
+                sem_gt_i = sem_gt_i - 1  # Convert: 1->0, 2->1
+            
+            # Get predictions - USE INDEX 0 (semantic), NOT INDEX 1 (panoptic)!
+            # pts_semantic_mask[0] = pure semantic predictions
+            # pts_semantic_mask[1] = panoptic predictions (encoded with instance IDs)
+            sem_pre_i = single_pred_results['pts_semantic_mask'][0].copy()
+            # Clamp predictions to valid semantic class range [0, NUM_CLASSES_SEM-1] = [0, 1]
+            sem_pre_i = np.clip(sem_pre_i, 0, NUM_CLASSES_SEM - 1)
+            
             ins_gt_i = eval_ann['pts_instance_mask']
             ins_pre_i = single_pred_results['pts_instance_mask'][1]
+            
+            # Debug: Check label ranges (only on first sample)
+            if len(gt_classes_global) == 0 or np.sum(gt_classes_global) == 0:
+                gt_unique = np.unique(sem_gt_i)
+                pred_unique = np.unique(sem_pre_i)
+                logger.info(f"Debug: GT labels range: {gt_unique}, Pred labels range: {pred_unique}")
+                logger.info(f"Debug: GT labels shape: {sem_gt_i.shape}, Pred labels shape: {sem_pre_i.shape}")
+                logger.info(f"Debug: NUM_CLASSES_SEM: {NUM_CLASSES_SEM}, NUM_CLASSES_BINARY: {NUM_CLASSES_BINARY}")
 
             # Ensure all arrays have the same size to avoid index out of bounds
             min_size = min(sem_gt_i.shape[0], sem_pre_i.shape[0], 
@@ -100,31 +121,48 @@ class UnifiedSegMetric(SegMetric):
             ins_pre_i = ins_pre_i[:min_size]
 
             # Semantic Segmentation Evaluation
+            # Labels are already 0-indexed and clamped above
             for j in range(min_size):
-                gt_l, pred_l = int(sem_gt_i[j]), int(sem_pre_i[j])
+                gt_l = int(sem_gt_i[j])
+                pred_l = int(sem_pre_i[j])
+                # Double-check bounds (should already be clamped, but safety check)
+                gt_l = max(0, min(gt_l, NUM_CLASSES_SEM - 1))
+                pred_l = max(0, min(pred_l, NUM_CLASSES_SEM - 1))
+                # Count all labels (0 and 1 are valid classes)
                 gt_classes_global[gt_l] += 1
                 positive_classes_global[pred_l] += 1
-                true_positive_classes_global[gt_l] += int(gt_l == pred_l)
+                if gt_l == pred_l:
+                    true_positive_classes_global[gt_l] += 1
 
             # Binary Semantic and Instance Evaluation
-            # Map semantic labels to binary: 1 for stuff (ground), 2 for thing (wood, leaf)
-            sem_gt_bi = np.copy(sem_gt_i)
-            sem_pre_bi = np.copy(sem_pre_i)
-            for sc in self.stuff_class_inds: sem_gt_bi[sem_gt_i == sc + 1] = 1
-            for sc in self.stuff_class_inds: sem_pre_bi[sem_pre_i == sc + 1] = 1
-            for tc in self.thing_class_inds: sem_gt_bi[sem_gt_i == tc + 1] = 2
-            for tc in self.thing_class_inds: sem_pre_bi[sem_pre_i == tc + 1] = 2
+            # Map semantic labels to binary: 2 for thing (wood, leaf)
+            # Labels are 0-indexed: 0=wood, 1=leaf, both map to binary 'tree' (2)
+            # Initialize binary arrays with 0 (unclassified)
+            sem_gt_bi = np.zeros_like(sem_gt_i, dtype=np.int64)
+            sem_pre_bi = np.zeros_like(sem_pre_i, dtype=np.int64)
+            # All thing classes (wood=0, leaf=1) map to binary 'tree' (2)
+            # Only map valid classes (0, 1) to tree (2)
+            for tc in self.thing_class_inds:
+                if 0 <= tc < NUM_CLASSES_SEM:  # Safety check
+                    sem_gt_bi[sem_gt_i == tc] = 2
+                    sem_pre_bi[sem_pre_i == tc] = 2
 
             # Use minimum size to avoid index out of bounds
             min_size_bi = min(sem_gt_bi.shape[0], sem_pre_bi.shape[0])
             for j in range(min_size_bi):
-                gt_l, pred_l = int(sem_gt_bi[j]), int(sem_pre_bi[j])
+                gt_l = int(sem_gt_bi[j])
+                pred_l = int(sem_pre_bi[j])
+                # CRITICAL: Clamp to binary array range [0, NUM_CLASSES_BINARY-1]
+                # Binary array: 0=unclassified, 1=non-tree, 2=tree
+                gt_l = max(0, min(gt_l, NUM_CLASSES_BINARY - 1))
+                pred_l = max(0, min(pred_l, NUM_CLASSES_BINARY - 1))
                 gt_classes_bi_global[gt_l] += 1
                 positive_classes_bi_global[pred_l] += 1
                 true_positive_classes_bi_global[gt_l] += int(gt_l == pred_l)
 
-            # Filter out points that are ground in both pred and gt for instance evaluation
-            idxc = (sem_gt_bi != 1) | (sem_pre_bi != 1)
+            # Filter out unclassified points (binary class 0) for instance evaluation
+            # Keep only tree points (binary class 2)
+            idxc = (sem_gt_bi == 2) | (sem_pre_bi == 2)
             pred_ins, gt_ins = ins_pre_i[idxc], ins_gt_i[idxc]
             pred_sem, gt_sem = sem_pre_bi[idxc], sem_gt_bi[idxc]
 
@@ -194,11 +232,11 @@ class UnifiedSegMetric(SegMetric):
 
         # Semantic Segmentation
         iou_list = []
-        valid_sem_classes = [i for i, n in enumerate(gt_classes_global) if n > 0 and i > 0] # Exclude unclassified
-        for i in range(1, NUM_CLASSES_SEM):
+        valid_sem_classes = [i for i, n in enumerate(gt_classes_global) if n > 0] # All classes with points
+        for i in range(NUM_CLASSES_SEM):
             iou = true_positive_classes_global[i] / float(gt_classes_global[i] + positive_classes_global[i] - true_positive_classes_global[i] + 1e-8)
             iou_list.append(iou)
-        metrics['mIoU'] = np.mean([iou_list[i-1] for i in valid_sem_classes]) if valid_sem_classes else 0.0
+        metrics['mIoU'] = np.mean([iou_list[i] for i in valid_sem_classes]) if valid_sem_classes else 0.0
 
         # Binary Semantic Segmentation
         iou_list_bi = []

@@ -17,6 +17,7 @@ Arguments:
 import os
 import sys
 import glob
+import shutil
 import numpy as np
 import logging
 import argparse
@@ -102,10 +103,15 @@ class CONFIG:
     CLASS_LEAF = 1    # Classification value for leaves
     
     # ForestFormer3D semantic label mapping
-    # 0,1 = branches -> map to 0
-    # 2 = leaves -> map to 1
-    FF3D_BRANCH_VALUES = [0, 1]
-    FF3D_LEAF_VALUE = 2
+    # NEW MODEL (scanner features): 0-indexed labels
+    # 0 = wood -> map to 0 (branch)
+    # 1 = leaf -> map to 1 (leaf)
+    # LEGACY MODEL: 0,1 = branches -> map to 0, 2 = leaves -> map to 1
+    USE_NEW_LABEL_MAPPING = True  # Set to False for legacy model
+    FF3D_WOOD_VALUE = 0  # New model: wood = 0
+    FF3D_LEAF_VALUE = 1  # New model: leaf = 1
+    FF3D_BRANCH_VALUES_LEGACY = [0, 1]  # Legacy: branches = 0,1
+    FF3D_LEAF_VALUE_LEGACY = 2  # Legacy: leaves = 2
     
     # Base directory for evaluation outputs
     EVALUATION_OUTPUT_DIR = "evaluation_results"
@@ -114,7 +120,9 @@ class CONFIG:
     SPATIAL_MATCH_TOLERANCE = 0.01  # 1cm tolerance for matching points
     
     # Default model checkpoint path (can be overridden)
-    DEFAULT_MODEL_CHECKPOINT = "work_dirs/clean_forestformer/epoch_3000_fix.pth"
+    # Default to scanner features model (new training)
+    DEFAULT_MODEL_CHECKPOINT = "work_dirs/heidelberg_features/epoch_500.pth"
+    LEGACY_MODEL_CHECKPOINT = "work_dirs/clean_forestformer/epoch_3000_fix.pth"
     
     # Prediction output directories
     # Can be set to inference_runs/run_TIMESTAMP/ or work_dirs/output/round_1
@@ -174,20 +182,34 @@ def load_forestformer3d_prediction(ply_path):
         logger.error(f"Error loading ForestFormer3D prediction from {rel_path(ply_path)}: {str(e)}")
         raise
 
-def map_forestformer3d_labels(semantic_pred):
+def map_forestformer3d_labels(semantic_pred, use_new_mapping=None):
     """
     Map ForestFormer3D semantic labels to standard format.
     
     Args:
-        semantic_pred: Numpy array of ForestFormer3D semantic predictions (0,1,2)
-        
+        semantic_pred: Numpy array of ForestFormer3D semantic predictions
+        use_new_mapping: If True, use new model mapping (0=wood, 1=leaf)
+                        If False, use legacy mapping (0,1=branch, 2=leaf)
+                        If None, auto-detect from CONFIG
+    
     Returns:
         Numpy array with mapped labels (0=branch, 1=leaf)
     """
-    # Map: 0,1 -> 0 (branch), 2 -> 1 (leaf)
+    if use_new_mapping is None:
+        use_new_mapping = CONFIG.USE_NEW_LABEL_MAPPING
+    
     mapped = np.zeros_like(semantic_pred, dtype=int)
-    mapped[semantic_pred == CONFIG.FF3D_LEAF_VALUE] = CONFIG.CLASS_LEAF
-    # Values 0 and 1 are already 0 (branch) in the mapped array
+    
+    if use_new_mapping:
+        # New model (scanner features): 0-indexed labels
+        # 0 = wood -> 0 (branch)
+        # 1 = leaf -> 1 (leaf)
+        mapped[semantic_pred == CONFIG.FF3D_LEAF_VALUE] = CONFIG.CLASS_LEAF
+        # Values 0 (wood) are already 0 (branch) in the mapped array
+    else:
+        # Legacy model: 0,1 = branches -> 0, 2 = leaves -> 1
+        mapped[semantic_pred == CONFIG.FF3D_LEAF_VALUE_LEGACY] = CONFIG.CLASS_LEAF
+        # Values 0 and 1 are already 0 (branch) in the mapped array
     
     return mapped
 
@@ -271,7 +293,10 @@ def evaluate_file(pred_ply_path, gt_file_path, output_dir=None, save_classified_
         pred_points, semantic_pred_ff3d = load_forestformer3d_prediction(pred_ply_path)
         
         # Map ForestFormer3D labels to standard format (0=branch, 1=leaf)
-        predictions = map_forestformer3d_labels(semantic_pred_ff3d)
+        # Auto-detect mapping based on label range
+        unique_labels = np.unique(semantic_pred_ff3d)
+        use_new_mapping = (unique_labels.max() <= 1)  # New model: max label is 1
+        predictions = map_forestformer3d_labels(semantic_pred_ff3d, use_new_mapping=use_new_mapping)
         
         # Load ground truth
         file_ext = os.path.splitext(gt_file_path)[1].lower()
@@ -390,7 +415,7 @@ def log_evaluation_to_wandb(model_checkpoint_path, results, runtime_seconds, out
         wandb_config = {
             # Model metadata
             "model_type": "ForestFormer3D",
-            "model_checkpoint_path": model_checkpoint_path,
+            "model_path": model_checkpoint_path,
             
             # Evaluation information
             "evaluation_files": evaluation_files,
@@ -459,15 +484,15 @@ def log_evaluation_to_wandb(model_checkpoint_path, results, runtime_seconds, out
 
 def generate_evaluation_report(results, model_checkpoint, output_dir, runtime_seconds):
     """Generate a detailed evaluation report."""
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    report_path = os.path.join(output_dir, f"evaluation_report_{timestamp}.txt")
+    report_path = os.path.join(output_dir, "evaluation_report.txt")
     
     with open(report_path, 'w') as f:
         f.write("ForestFormer3D Evaluation Report\n")
         f.write("=" * 60 + "\n\n")
         f.write(f"Evaluation timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"Runtime: {runtime_seconds:.1f} seconds\n")
-        f.write(f"Model checkpoint: {model_checkpoint}\n\n")
+        f.write(f"Model checkpoint: {model_checkpoint}\n")
+        f.write(f"Output directory: {output_dir}\n\n")
         
         valid_results = [r for r in results if r is not None]
         
@@ -513,9 +538,27 @@ def find_model_checkpoint(default_path=None):
     if default_path and os.path.exists(default_path):
         return default_path
     
-    # Try default path from CONFIG
+    # Try scanner features model first (new training)
     if os.path.exists(CONFIG.DEFAULT_MODEL_CHECKPOINT):
         return CONFIG.DEFAULT_MODEL_CHECKPOINT
+    
+    # Try to find best.pth or latest epoch in heidelberg_features
+    heidelberg_dir = "work_dirs/heidelberg_features"
+    if os.path.exists(heidelberg_dir):
+        best_pth = os.path.join(heidelberg_dir, "best.pth")
+        if os.path.exists(best_pth):
+            return best_pth
+        # Find latest epoch
+        pth_files = glob.glob(os.path.join(heidelberg_dir, "epoch_*.pth"))
+        if pth_files:
+            # Sort by epoch number
+            pth_files.sort(key=lambda x: int(os.path.basename(x).split('_')[1].split('.')[0]))
+            return pth_files[-1]
+    
+    # Fallback to legacy model
+    if os.path.exists(CONFIG.LEGACY_MODEL_CHECKPOINT):
+        logger.warning("Using legacy model. Consider using scanner features model.")
+        return CONFIG.LEGACY_MODEL_CHECKPOINT
     
     # Try to find any .pth file in work_dirs/clean_forestformer/
     work_dir = "work_dirs/clean_forestformer"
@@ -582,29 +625,11 @@ def main():
         logger.error("No valid evaluation files found. Exiting.")
         sys.exit(1)
     
-    # Check which files need inference
-    files_needing_inference = []
-    for gt_file_path in valid_evaluation_files:
-        file_name = os.path.basename(gt_file_path)
-        base_name = os.path.splitext(file_name)[0]
-        
-        # Check if prediction exists
-        pred_file = None
-        if CONFIG.USE_TIMESTAMPED_RUNS:
-            run_dirs = glob.glob(os.path.join(pred_output_dir, "run_*"))
-            for run_dir in sorted(run_dirs, reverse=True):
-                pattern = os.path.join(run_dir, f"{base_name}_classified_by_ff3d.ply")
-                matching = glob.glob(pattern)
-                if matching:
-                    pred_file = matching[0]
-                    break
-        
-        if not pred_file:
-            files_needing_inference.append(gt_file_path)
+    # Always run inference with the specified model (never reuse old predictions)
+    logger.info(f"Running inference on {len(valid_evaluation_files)} file(s) with model: {os.path.basename(model_checkpoint)}")
     
-    # Run inference on files that need it
-    if files_needing_inference:
-        logger.info(f"Running inference on {len(files_needing_inference)} file(s) that don't have predictions...")
+    # Run inference on all evaluation files
+    if valid_evaluation_files:
         
         # Import inference function
         infer_script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -613,9 +638,9 @@ def main():
         
         try:
             inference_output_dir = run_inference_on_files(
-                input_files=files_needing_inference,
+                input_files=valid_evaluation_files,
                 model_path=model_checkpoint,
-                config_file=None,  # Use default
+                config_file=None,  # Use default (auto-detected based on model)
                 output_dir=None,  # Create timestamped directory
                 cuda_device=args.cuda_device,
                 keep_intermediate=False
@@ -627,64 +652,47 @@ def main():
             logger.error(traceback.format_exc())
             sys.exit(1)
     
-    # Create output directory for evaluation results
-    output_dir = args.output if args.output else CONFIG.EVALUATION_OUTPUT_DIR
+    # Create timestamped output directory for evaluation results
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    base_output_dir = args.output if args.output else CONFIG.EVALUATION_OUTPUT_DIR
+    output_dir = os.path.join(base_output_dir, f"eval_{timestamp}")
     os.makedirs(output_dir, exist_ok=True)
+    logger.info(f"Evaluation results will be saved to: {rel_path(output_dir)}")
     
-    # Process files
+    # Process files - use predictions from the inference run we just created
     results = []
     start_time = time.time()
     
+    # Get the inference run directory we just created (most recent)
+    run_dirs = sorted(glob.glob(os.path.join(pred_output_dir, "run_*")), reverse=True)
+    if not run_dirs:
+        logger.error("No inference run directory found. Inference may have failed.")
+        sys.exit(1)
+    
+    latest_run_dir = run_dirs[0]
+    logger.info(f"Using predictions from: {rel_path(latest_run_dir)}")
+    
+    # Copy inference files to evaluation output directory
+    logger.info(f"Copying inference files to evaluation directory...")
+    inference_files_dir = os.path.join(output_dir, "inference_files")
+    os.makedirs(inference_files_dir, exist_ok=True)
+    
     for gt_file_path in valid_evaluation_files:
         file_name = os.path.basename(gt_file_path)
-        
-        # Find corresponding prediction file
         base_name = os.path.splitext(file_name)[0]
         
-        # Try to find the new naming convention first: *_classified_by_ff3d.ply
-        pred_file = None
+        # Find prediction file in the inference run we just created
+        pred_file = os.path.join(latest_run_dir, f"{base_name}_classified_by_ff3d.ply")
         
-        if CONFIG.USE_TIMESTAMPED_RUNS:
-            # Search in inference_runs/run_*/ directories
-            run_dirs = glob.glob(os.path.join(pred_output_dir, "run_*"))
-            for run_dir in sorted(run_dirs, reverse=True):  # Start with most recent
-                pattern = os.path.join(run_dir, f"{base_name}_classified_by_ff3d.ply")
-                matching = glob.glob(pattern)
-                if matching:
-                    pred_file = matching[0]
-                    break
-        else:
-            # Legacy: look in work_dirs/output/round_1
-            pattern = os.path.join(pred_output_dir, f"{base_name}_classified_by_ff3d.ply")
-            matching = glob.glob(pattern)
-            if matching:
-                pred_file = matching[0]
-        
-        # Fallback: try old naming conventions for backward compatibility
-        if not pred_file:
-            # Try *_round*.ply pattern (legacy)
-            if CONFIG.USE_TIMESTAMPED_RUNS:
-                for run_dir in sorted(glob.glob(os.path.join(pred_output_dir, "run_*")), reverse=True):
-                    pattern = os.path.join(run_dir, f"{base_name}_round*.ply")
-                    matching = glob.glob(pattern)
-                    if matching:
-                        pred_file = sorted(matching)[0]
-                        break
-            else:
-                pattern = os.path.join(pred_output_dir, f"{base_name}_round*.ply")
-                matching = glob.glob(pattern)
-                if matching:
-                    pred_file = sorted(matching)[0]
-        
-        # Final fallback: try *_1.ply (raw output in work_dirs/output)
-        if not pred_file:
-            legacy_pattern = os.path.join("work_dirs/output", f"{base_name}_1.ply")
-            if os.path.exists(legacy_pattern):
-                pred_file = os.path.abspath(legacy_pattern)
-        
-        if not pred_file:
-            logger.error(f"Prediction file not found for {file_name} after inference step")
+        if not os.path.exists(pred_file):
+            logger.error(f"Prediction file not found: {rel_path(pred_file)}")
+            logger.error(f"Expected after inference step. Check inference output.")
             sys.exit(1)
+        
+        # Copy inference file to evaluation directory
+        inference_copy = os.path.join(inference_files_dir, f"{base_name}_classified_by_ff3d.ply")
+        shutil.copy2(pred_file, inference_copy)
+        logger.info(f"Copied inference file: {os.path.basename(inference_copy)}")
         
         logger.info(f"Evaluating: {file_name} -> {os.path.basename(pred_file)}")
         

@@ -4,14 +4,15 @@ Convert LAS/PLY files to ForestFormer3D training format.
 
 This script:
 1. Converts LAS/LAZ to PLY if needed (using convert_las_to_ply.py)
-2. Maps classification labels: 0→2 (wood), 1→3 (leaf)
-3. Sets treeID = 1 for all points (one tree per file)
-4. Removes scanner features, keeps only: x, y, z, semantic_seg, treeID
-5. Saves to output directory following ForAINetV2 structure
+2. Maps classification labels: 0→1 (wood), 1→2 (leaf)
+3. Adds dummy ground points (semantic_seg=0, treeID=0) at the bottom
+4. Sets treeID = 1 for all non-ground points (one tree per file)
+5. Removes scanner features, keeps only: x, y, z, semantic_seg, treeID
+6. Saves to output directory following ForAINetV2 structure
 
 Usage:
-    python tools/prepare_training_data.py --input-dir /path/to/input --output-dir /path/to/output
-    python tools/prepare_training_data.py --input-dir test_input_dir --output-dir test_output_dir
+    python tools/prepare_my_custom_training_data.py --input-dir /path/to/input --output-dir /path/to/output
+    python tools/prepare_my_custom_training_data.py --input-dir test_input_dir --output-dir test_output_dir --num-ground-points 2000
 """
 
 import os
@@ -50,13 +51,15 @@ def read_ply_file(ply_path):
     return data, len(vertex_data)
 
 
-def convert_file_to_training_format(input_path, output_path):
+def convert_file_to_training_format(input_path, output_path, num_ground_points=1000, ground_height_offset=-0.5):
     """
     Convert a single file to training format.
     
     Args:
         input_path: Path to input file (LAS/LAZ/PLY)
         output_path: Path to output PLY file
+        num_ground_points: Number of dummy ground points to add (default: 1000)
+        ground_height_offset: Z offset for ground points relative to min Z (default: -0.5)
         
     Returns:
         tuple: (success: bool, num_points: int, message: str)
@@ -101,13 +104,13 @@ def convert_file_to_training_format(input_path, output_path):
         # Convert to int for comparison (handles float values like 0.0, 1.0)
         classification_int = classification.astype(np.int64)
         
-        # Map: 0 (wood) → 2, 1 (leaf) → 3
-        # semantic_seg should be 1-indexed: 1=ground, 2=wood, 3=leaf
+        # Map: 0 (wood) → 1, 1 (leaf) → 2
+        # Model expects: 0=ground, 1=wood, 2=leaf
         semantic_seg = np.zeros_like(classification_int, dtype=np.int64)
         wood_mask = (classification_int == 0)
         leaf_mask = (classification_int == 1)
-        semantic_seg[wood_mask] = 2  # wood
-        semantic_seg[leaf_mask] = 3  # leaf
+        semantic_seg[wood_mask] = 1  # wood
+        semantic_seg[leaf_mask] = 2  # leaf
         
         # Check if all points were mapped
         unmapped = np.sum((semantic_seg == 0) & (classification_int != 0) & (classification_int != 1))
@@ -115,10 +118,51 @@ def convert_file_to_training_format(input_path, output_path):
             unique_vals = np.unique(classification_int)
             return False, 0, f"Found unmapped classification values: {unique_vals}. Expected only 0 (wood) and 1 (leaf)."
         
-        # Step 5: Set treeID = 1 for all points
+        # Step 5: Set treeID = 1 for all non-ground points (ground will be added later)
         treeID = np.ones(num_points, dtype=np.int64)
         
-        # Step 6: Create new PLY with only required fields
+        # Step 6: Add dummy ground points at the bottom
+        # Calculate bounding box
+        x_min, x_max = x.min(), x.max()
+        y_min, y_max = y.min(), y.max()
+        z_min, z_max = z.min(), z.max()
+        
+        # Use provided parameters for ground points
+        
+        # Create ground points in a grid pattern at the bottom
+        x_range = x_max - x_min
+        y_range = y_max - y_min
+        
+        # Create grid of ground points
+        grid_size = int(np.sqrt(num_ground_points))
+        if grid_size < 1:
+            grid_size = 1
+        
+        # Generate grid coordinates
+        x_ground = np.linspace(x_min - 0.1 * x_range, x_max + 0.1 * x_range, grid_size)
+        y_ground = np.linspace(y_min - 0.1 * y_range, y_max + 0.1 * y_range, grid_size)
+        xx, yy = np.meshgrid(x_ground, y_ground)
+        
+        # Flatten and take only the requested number
+        x_ground_flat = xx.flatten()[:num_ground_points]
+        y_ground_flat = yy.flatten()[:num_ground_points]
+        z_ground = np.full(len(x_ground_flat), z_min + ground_height_offset, dtype=np.float64)
+        
+        # Ground points have semantic_seg = 0 and treeID = 0 (background)
+        semantic_seg_ground = np.zeros(len(x_ground_flat), dtype=np.int64)
+        treeID_ground = np.zeros(len(x_ground_flat), dtype=np.int64)
+        
+        # Step 7: Concatenate original points with ground points
+        x_all = np.concatenate([x, x_ground_flat])
+        y_all = np.concatenate([y, y_ground_flat])
+        z_all = np.concatenate([z, z_ground])
+        semantic_seg_all = np.concatenate([semantic_seg, semantic_seg_ground])
+        treeID_all = np.concatenate([treeID, treeID_ground])
+        
+        num_total = len(x_all)
+        num_ground_added = len(x_ground_flat)
+        
+        # Step 8: Create new PLY with only required fields
         dtype_list = [
             ('x', 'f8'),      # float64
             ('y', 'f8'),
@@ -127,14 +171,14 @@ def convert_file_to_training_format(input_path, output_path):
             ('treeID', 'i4')
         ]
         
-        vertex_data = np.empty(num_points, dtype=dtype_list)
-        vertex_data['x'] = x
-        vertex_data['y'] = y
-        vertex_data['z'] = z
-        vertex_data['semantic_seg'] = semantic_seg
-        vertex_data['treeID'] = treeID
+        vertex_data = np.empty(num_total, dtype=dtype_list)
+        vertex_data['x'] = x_all
+        vertex_data['y'] = y_all
+        vertex_data['z'] = z_all
+        vertex_data['semantic_seg'] = semantic_seg_all
+        vertex_data['treeID'] = treeID_all
         
-        # Step 7: Write binary PLY file
+        # Step 9: Write binary PLY file
         el = PlyElement.describe(vertex_data, 'vertex')
         os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else '.', exist_ok=True)
         PlyData([el], text=False).write(output_path)
@@ -143,11 +187,12 @@ def convert_file_to_training_format(input_path, output_path):
         if temp_ply and os.path.exists(temp_ply):
             os.remove(temp_ply)
         
-        # Count wood and leaf points
+        # Count points by class
         num_wood = np.sum(wood_mask)
         num_leaf = np.sum(leaf_mask)
+        num_ground = num_ground_added
         
-        return True, num_points, f"Converted: {num_wood} wood, {num_leaf} leaf points"
+        return True, num_total, f"Converted: {num_wood} wood, {num_leaf} leaf, {num_ground} ground points (total: {num_total})"
         
     except Exception as e:
         # Cleanup temp file on error
@@ -159,7 +204,7 @@ def convert_file_to_training_format(input_path, output_path):
         return False, 0, f"Error: {str(e)}"
 
 
-def process_directory(input_dir, output_dir, output_subdir='train_val_data'):
+def process_directory(input_dir, output_dir, output_subdir='train_val_data', num_ground_points=1000, ground_height_offset=-0.5):
     """
     Process all files in input directory and save to output directory.
     
@@ -167,6 +212,8 @@ def process_directory(input_dir, output_dir, output_subdir='train_val_data'):
         input_dir: Input directory containing LAS/PLY files
         output_dir: Base output directory
         output_subdir: Subdirectory name (train_val_data or test_data)
+        num_ground_points: Number of dummy ground points to add per file (default: 1000)
+        ground_height_offset: Z offset for ground points relative to min Z (default: -0.5)
     """
     input_dir = os.path.abspath(input_dir)
     output_dir = os.path.abspath(output_dir)
@@ -199,7 +246,12 @@ def process_directory(input_dir, output_dir, output_subdir='train_val_data'):
         
         print(f"[{i}/{len(input_files)}] Processing: {os.path.basename(input_file)}")
         
-        success, num_points, message = convert_file_to_training_format(input_file, output_file)
+        success, num_points, message = convert_file_to_training_format(
+            input_file, 
+            output_file,
+            num_ground_points=num_ground_points,
+            ground_height_offset=ground_height_offset
+        )
         
         if success:
             print(f"  ✅ {message}")
@@ -285,16 +337,18 @@ def verify_output_file(ply_path):
         if extra_fields:
             issues.append(f"Unexpected extra fields: {extra_fields}")
         
-        # Check semantic_seg values (should be 2 or 3)
+        # Check semantic_seg values (should be 0, 1, or 2: ground, wood, leaf)
         if 'semantic_seg' in available_fields:
             semantic_seg = np.asarray(vertex_data['semantic_seg'])
             unique_vals = np.unique(semantic_seg)
-            invalid_vals = [v for v in unique_vals if v not in [2, 3]]
+            invalid_vals = [v for v in unique_vals if v not in [0, 1, 2]]
             if invalid_vals:
-                issues.append(f"semantic_seg contains invalid values: {invalid_vals}. Expected only 2 (wood) or 3 (leaf)")
+                issues.append(f"semantic_seg contains invalid values: {invalid_vals}. Expected 0 (ground), 1 (wood), or 2 (leaf)")
             
-            num_wood = np.sum(semantic_seg == 2)
-            num_leaf = np.sum(semantic_seg == 3)
+            num_ground = np.sum(semantic_seg == 0)
+            num_wood = np.sum(semantic_seg == 1)
+            num_leaf = np.sum(semantic_seg == 2)
+            info['num_ground'] = int(num_ground)
             info['num_wood'] = int(num_wood)
             info['num_leaf'] = int(num_leaf)
         
@@ -365,6 +419,18 @@ Examples:
         action='store_true',
         help='Only verify existing output files, do not convert'
     )
+    parser.add_argument(
+        '--num-ground-points',
+        type=int,
+        default=1000,
+        help='Number of dummy ground points to add per file (default: 1000)'
+    )
+    parser.add_argument(
+        '--ground-height-offset',
+        type=float,
+        default=-0.5,
+        help='Z offset for ground points relative to min Z (default: -0.5)'
+    )
     
     args = parser.parse_args()
     
@@ -416,7 +482,13 @@ Examples:
             sys.exit(1)
     else:
         # Process files
-        process_directory(args.input_dir, args.output_dir, args.subdir)
+        process_directory(
+            args.input_dir, 
+            args.output_dir, 
+            args.subdir,
+            num_ground_points=args.num_ground_points,
+            ground_height_offset=args.ground_height_offset
+        )
         
         # Auto-verify after conversion
         print("\n" + "=" * 60)
@@ -444,7 +516,7 @@ Examples:
                         pass
                 else:
                     print(f"✅ {base_name}: {info.get('num_points', 0):,} points, "
-                          f"Wood: {info.get('num_wood', 0):,}, Leaf: {info.get('num_leaf', 0):,}")
+                          f"Ground: {info.get('num_ground', 0):,}, Wood: {info.get('num_wood', 0):,}, Leaf: {info.get('num_leaf', 0):,}")
             
             if all_valid:
                 print("\n✅ All converted files passed verification!")

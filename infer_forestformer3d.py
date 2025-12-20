@@ -23,6 +23,13 @@ from pathlib import Path
 from datetime import datetime
 from scipy.spatial import cKDTree
 
+# Try to import GPU checking libraries
+try:
+    import pynvml
+    PYNVML_AVAILABLE = True
+except ImportError:
+    PYNVML_AVAILABLE = False
+
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
@@ -30,6 +37,126 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
+
+#####################################################################
+# GPU DETECTION FUNCTIONS
+#####################################################################
+
+def get_gpu_memory_info():
+    """
+    Get GPU memory information for all available GPUs.
+    
+    Returns:
+        list: List of dicts with keys: 'device_id', 'total_mb', 'used_mb', 'free_mb', 'utilization'
+    """
+    gpu_info = []
+    
+    if PYNVML_AVAILABLE:
+        try:
+            pynvml.nvmlInit()
+            device_count = pynvml.nvmlDeviceGetCount()
+            
+            for i in range(device_count):
+                handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+                mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+                
+                gpu_info.append({
+                    'device_id': i,
+                    'total_mb': mem_info.total / (1024**2),
+                    'used_mb': mem_info.used / (1024**2),
+                    'free_mb': mem_info.free / (1024**2),
+                    'utilization': util.gpu
+                })
+            
+            pynvml.nvmlShutdown()
+            return gpu_info
+        except Exception as e:
+            logger.debug(f"Failed to get GPU info via pynvml: {e}")
+    
+    # Fallback: parse nvidia-smi output
+    try:
+        result = subprocess.run(
+            ['nvidia-smi', '--query-gpu=index,memory.total,memory.used,memory.free,utilization.gpu', 
+             '--format=csv,noheader,nounits'],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        
+        for line in result.stdout.strip().split('\n'):
+            if not line.strip():
+                continue
+            parts = [p.strip() for p in line.split(',')]
+            if len(parts) >= 5:
+                gpu_info.append({
+                    'device_id': int(parts[0]),
+                    'total_mb': float(parts[1]),
+                    'used_mb': float(parts[2]),
+                    'free_mb': float(parts[3]),
+                    'utilization': float(parts[4])
+                })
+        
+        return gpu_info
+    except Exception as e:
+        logger.debug(f"Failed to get GPU info via nvidia-smi: {e}")
+        return []
+
+def find_best_gpu(min_free_mb=5000, max_utilization=80):
+    """
+    Find the GPU with the most free memory that meets criteria.
+    
+    Args:
+        min_free_mb: Minimum free memory in MB (default: 5GB)
+        max_utilization: Maximum GPU utilization percentage (default: 80%)
+        
+    Returns:
+        int or None: Device ID of best GPU, or None if none available
+    """
+    gpu_info = get_gpu_memory_info()
+    
+    if not gpu_info:
+        logger.warning("Could not detect GPU information. Using default GPU 0.")
+        return "0"
+    
+    # Filter GPUs that meet criteria
+    suitable_gpus = [
+        gpu for gpu in gpu_info
+        if gpu['free_mb'] >= min_free_mb and gpu['utilization'] <= max_utilization
+    ]
+    
+    if not suitable_gpus:
+        return None
+    
+    # Sort by free memory (descending) and return the best one
+    suitable_gpus.sort(key=lambda x: x['free_mb'], reverse=True)
+    best_gpu = suitable_gpus[0]
+    
+    return str(best_gpu['device_id'])
+
+def display_gpu_status():
+    """Display status of all GPUs."""
+    gpu_info = get_gpu_memory_info()
+    
+    if not gpu_info:
+        logger.warning("Could not detect GPU information.")
+        return
+    
+    logger.info("=" * 70)
+    logger.info("GPU Status:")
+    logger.info("=" * 70)
+    logger.info(f"{'GPU':<6} {'Total (GB)':<12} {'Used (GB)':<12} {'Free (GB)':<12} {'Util %':<10}")
+    logger.info("-" * 70)
+    
+    for gpu in gpu_info:
+        total_gb = gpu['total_mb'] / 1024
+        used_gb = gpu['used_mb'] / 1024
+        free_gb = gpu['free_mb'] / 1024
+        util = gpu['utilization']
+        
+        logger.info(f"{gpu['device_id']:<6} {total_gb:<12.2f} {used_gb:<12.2f} {free_gb:<12.2f} {util:<10.1f}")
+    
+    logger.info("=" * 70)
 
 #####################################################################
 # HELPER FUNCTIONS
@@ -65,8 +192,13 @@ class CONFIG:
     META_DIR = os.path.join(WORK_DIR, "data/ForAINetV2/meta_data")
     
     # Model and config paths
-    CONFIG_FILE = os.path.join(WORK_DIR, "configs/oneformer3d_qs_radius16_qp300_2many.py")
-    DEFAULT_MODEL_PATH = os.path.join(WORK_DIR, "work_dirs/clean_forestformer/epoch_3000_fix.pth")
+    # Default to scanner features model (new training)
+    CONFIG_FILE = os.path.join(WORK_DIR, "configs/oneformer3d_qs_radius16_qp300_2many_features.py")
+    DEFAULT_MODEL_PATH = os.path.join(WORK_DIR, "work_dirs/heidelberg_features/epoch_500.pth")
+    
+    # Legacy model paths (for backward compatibility)
+    LEGACY_CONFIG_FILE = os.path.join(WORK_DIR, "configs/oneformer3d_qs_radius16_qp300_2many.py")
+    LEGACY_MODEL_PATH = os.path.join(WORK_DIR, "work_dirs/clean_forestformer/epoch_3000_fix.pth")
     
     # Default output directory (intermediate files)
     DEFAULT_INTERMEDIATE_OUTPUT_DIR = os.path.join(WORK_DIR, "work_dirs/output")
@@ -90,8 +222,27 @@ def find_model_checkpoint(custom_path=None):
     if custom_path and os.path.exists(custom_path):
         return custom_path
     
+    # Try scanner features model first (new training)
     if os.path.exists(CONFIG.DEFAULT_MODEL_PATH):
         return CONFIG.DEFAULT_MODEL_PATH
+    
+    # Try to find best.pth or latest epoch in heidelberg_features
+    heidelberg_dir = os.path.join(CONFIG.WORK_DIR, "work_dirs/heidelberg_features")
+    if os.path.exists(heidelberg_dir):
+        best_pth = os.path.join(heidelberg_dir, "best.pth")
+        if os.path.exists(best_pth):
+            return best_pth
+        # Find latest epoch
+        pth_files = glob.glob(os.path.join(heidelberg_dir, "epoch_*.pth"))
+        if pth_files:
+            # Sort by epoch number
+            pth_files.sort(key=lambda x: int(os.path.basename(x).split('_')[1].split('.')[0]))
+            return pth_files[-1]
+    
+    # Fallback to legacy model
+    if os.path.exists(CONFIG.LEGACY_MODEL_PATH):
+        logger.warning("Using legacy model. Consider training with scanner features.")
+        return CONFIG.LEGACY_MODEL_PATH
     
     # Try to find any .pth file in work_dirs/clean_forestformer/
     work_dir = os.path.join(CONFIG.WORK_DIR, "work_dirs/clean_forestformer")
@@ -257,38 +408,78 @@ def run_inference(config_file, model_path, cuda_device="0"):
     env['CUDA_VISIBLE_DEVICES'] = cuda_device
     env['CURRENT_ITERATION'] = '1'
     
+    # Override data_root and ann_file to use standard location where test data is placed
+    # This ensures compatibility with configs that use different data roots (e.g., heidelberg)
+    standard_data_root = os.path.join(CONFIG.WORK_DIR, 'data/ForAINetV2')
+    cfg_overrides = [
+        f"test_dataloader.dataset.data_root='{standard_data_root}'",
+        f"test_dataloader.dataset.ann_file='forainetv2_oneformer3d_infos_test.pkl'"
+    ]
+    
     try:
         result = subprocess.run(
-            [sys.executable, os.path.join(CONFIG.WORK_DIR, "tools/test.py"), config_file, model_path],
+            [sys.executable, os.path.join(CONFIG.WORK_DIR, "tools/test.py"), config_file, model_path,
+             "--cfg-options"] + cfg_overrides,
             cwd=CONFIG.WORK_DIR,
             env=env,
             check=True,
             capture_output=True,
             text=True
         )
+        # Log output even on success to help debug issues
+        if result.stdout:
+            logger.debug(f"test.py stdout: {result.stdout}")
+        if result.stderr:
+            logger.debug(f"test.py stderr: {result.stderr}")
         return True
     except subprocess.CalledProcessError as e:
         logger.error(f"Inference failed: {e}")
+        if e.stdout:
+            logger.error(f"stdout: {e.stdout}")
         if e.stderr:
-            logger.error(f"Error output: {e.stderr}")
+            logger.error(f"stderr: {e.stderr}")
         return False
 
-def copy_final_predictions(base_name, original_input_file, intermediate_output_dir, final_output_dir, tolerance=0.01):
+def copy_final_predictions(base_name, original_input_file, intermediate_output_dir, final_output_dir, tolerance=0.1):
     """
     Match ForestFormer3D prediction points to the original point cloud using spatial KDTree
-    and save a new PLY containing ONLY matched points, with original coordinates and
-    all original fields plus semantic_pred / instance_pred / score.
+    and save a new PLY with ALL original points, assigning predictions where available.
     
-    Unmatched original points are dropped.
+    The model processes a subset of points (after CylinderCrop, GridSample, PointSample),
+    so predictions are only available for that subset. This function:
+    1. Matches prediction points to original points
+    2. Assigns predictions to the corresponding original points
+    3. Keeps ALL original points (unmatched points get default/unknown predictions)
+    
+    Args:
+        tolerance: Maximum distance (in meters) for matching points. Default 0.1m (10cm).
+                   If matching fails with default tolerance, will try larger tolerances automatically.
     """
     # Look for the raw output file with predictions
     pred_file = os.path.join(intermediate_output_dir, f"{base_name}_1.ply")
     if not os.path.exists(pred_file):
         logger.warning(f"Output file not found at {pred_file}")
         logger.info("Checking for alternative output locations...")
+        # Check for files with base_name
         alt_files = glob.glob(os.path.join(intermediate_output_dir, f"*{base_name}*"))
         if alt_files:
-            logger.info(f"Found: {alt_files[:5]}")
+            logger.info(f"Found files matching '{base_name}': {alt_files[:5]}")
+        # Check all recent PLY files
+        all_ply_files = glob.glob(os.path.join(intermediate_output_dir, "*.ply"))
+        if all_ply_files:
+            # Sort by modification time, most recent first
+            all_ply_files.sort(key=os.path.getmtime, reverse=True)
+            logger.info(f"Most recent PLY files in output directory: {[os.path.basename(f) for f in all_ply_files[:5]]}")
+        # Check subdirectories
+        subdirs = [d for d in os.listdir(intermediate_output_dir) if os.path.isdir(os.path.join(intermediate_output_dir, d))]
+        if subdirs:
+            logger.info(f"Found subdirectories: {subdirs[:5]}")
+            for subdir in subdirs[:3]:
+                subdir_files = glob.glob(os.path.join(intermediate_output_dir, subdir, f"*{base_name}*.ply"))
+                if subdir_files:
+                    logger.info(f"  Found in {subdir}: {[os.path.basename(f) for f in subdir_files[:3]]}")
+        logger.error(f"Could not find expected output file: {pred_file}")
+        logger.error("This usually means the inference step failed or produced output with a different name.")
         return False
 
     # Load offsets (used by preprocessing) so we can center original coords to model space
@@ -356,33 +547,65 @@ def copy_final_predictions(base_name, original_input_file, intermediate_output_d
         tree = cKDTree(orig_centered)
 
         # 4) Match each prediction point to the nearest original point
-        logger.info(f"  Matching {len(pred_vertex)} prediction points (tolerance={tolerance}m)...")
-        distances, indices = tree.query(pred_points, k=1)
-        matched_mask = distances <= tolerance
-        num_matched = int(np.sum(matched_mask))
-        num_total = len(pred_vertex)
-
-        if num_matched == 0:
-            logger.error("No prediction points matched to the original cloud within tolerance.")
+        # Try with increasing tolerances if initial matching fails
+        tolerances_to_try = [tolerance, tolerance * 2, tolerance * 5, tolerance * 10, 1.0, 5.0]
+        matched_mask = None
+        final_tolerance = tolerance
+        distances = None
+        indices = None
+        
+        for tol in tolerances_to_try:
+            logger.info(f"  Matching {len(pred_vertex)} prediction points to {len(orig_points):,} original points (tolerance={tol:.3f}m)...")
+            distances, indices = tree.query(pred_points, k=1)
+            matched_mask = distances <= tol
+            num_matched = int(np.sum(matched_mask))
+            num_total = len(pred_vertex)
+            
+            match_rate = num_matched / num_total if num_total > 0 else 0
+            logger.info(f"    Matched {num_matched:,}/{num_total:,} prediction points ({100*match_rate:.1f}%)")
+            
+            # If we get at least 50% match rate, use this tolerance
+            if match_rate >= 0.5:
+                final_tolerance = tol
+                if tol > tolerance:
+                    logger.warning(f"  Used larger tolerance ({tol:.3f}m) to achieve {100*match_rate:.1f}% match rate")
+                break
+        
+        if matched_mask is None or num_matched == 0:
+            logger.error("No prediction points matched to the original cloud even with large tolerance.")
+            if distances is not None:
+                logger.error(f"  Distance statistics: min={distances.min():.4f}m, max={distances.max():.4f}m, "
+                            f"mean={distances.mean():.4f}m, median={np.median(distances):.4f}m")
             return False
+        
+        if num_matched < num_total * 0.5:
+            logger.warning(f"  Only {100*num_matched/num_total:.1f}% of prediction points matched. "
+                          f"This may indicate coordinate system misalignment.")
 
-        logger.info(f"  Matched {num_matched}/{num_total} prediction points to original cloud")
-
-        # 5) Build new vertex array using ONLY matched original points
+        # 5) Create arrays for ALL original points (not just matched ones)
+        # Initialize prediction arrays for all original points with default values
+        num_original = len(original_vertex)
+        
+        # Default values for unmatched points
+        default_semantic = -1  # Unknown/unlabeled
+        default_instance = -1  # Unknown/unlabeled
+        default_score = 0.0
+        
+        # Create prediction arrays for all original points
+        semantic_pred_all = np.full(num_original, default_semantic, dtype=np.int32)
+        instance_pred_all = np.full(num_original, default_instance, dtype=np.int32)
+        score_all = np.full(num_original, default_score, dtype=np.float32)
+        
+        # Assign predictions to matched original points
         matched_orig_indices = indices[matched_mask]
-
-        # Extract prediction fields (filtered to matched points)
-        semantic_pred = pred_vertex["semantic_pred"][matched_mask]
-        instance_pred = (
-            pred_vertex["instance_pred"][matched_mask]
-            if "instance_pred" in pred_vertex.dtype.names
-            else None
-        )
-        score = (
-            pred_vertex["score"][matched_mask]
-            if "score" in pred_vertex.dtype.names
-            else None
-        )
+        semantic_pred_all[matched_orig_indices] = pred_vertex["semantic_pred"][matched_mask]
+        if "instance_pred" in pred_vertex.dtype.names:
+            instance_pred_all[matched_orig_indices] = pred_vertex["instance_pred"][matched_mask]
+        if "score" in pred_vertex.dtype.names:
+            score_all[matched_orig_indices] = pred_vertex["score"][matched_mask]
+        
+        logger.info(f"  Assigned predictions to {len(matched_orig_indices):,} original points")
+        logger.info(f"  {num_original - len(matched_orig_indices):,} points have no predictions (will use default values)")
 
         # Create new dtype list starting with original fields
         dtype_list = list(original_vertex.dtype.descr)
@@ -390,30 +613,31 @@ def copy_final_predictions(base_name, original_input_file, intermediate_output_d
         # Add prediction fields if not already present
         if "semantic_pred" not in original_vertex.dtype.names:
             dtype_list.append(("semantic_pred", "<i4"))
-        if instance_pred is not None and "instance_pred" not in original_vertex.dtype.names:
+        if "instance_pred" not in original_vertex.dtype.names:
             dtype_list.append(("instance_pred", "<i4"))
-        if score is not None and "score" not in original_vertex.dtype.names:
+        if "score" not in original_vertex.dtype.names:
             dtype_list.append(("score", "<f4"))
 
-        # Create new structured array with matched original data + predictions
-        vertex_data = np.empty(num_matched, dtype=dtype_list)
+        # Create new structured array with ALL original data + predictions
+        vertex_data = np.empty(num_original, dtype=dtype_list)
 
-        # Copy original fields for matched points
+        # Copy ALL original fields
         for field_name in original_vertex.dtype.names:
-            vertex_data[field_name] = original_vertex[field_name][matched_orig_indices]
+            vertex_data[field_name] = original_vertex[field_name]
 
-        # Add prediction fields
-        vertex_data["semantic_pred"] = semantic_pred
-        if instance_pred is not None:
-            vertex_data["instance_pred"] = instance_pred
-        if score is not None:
-            vertex_data["score"] = score
+        # Add prediction fields for ALL points
+        vertex_data["semantic_pred"] = semantic_pred_all
+        vertex_data["instance_pred"] = instance_pred_all
+        vertex_data["score"] = score_all
 
-        # 6) Write PLY file (world coordinates, matched subset only)
+        # 6) Write PLY file (world coordinates, ALL original points)
         el = PlyElement.describe(vertex_data, "vertex")
         PlyData([el], text=False).write(final_output_path)
 
         logger.info(f"  Saved: {os.path.basename(final_output_path)}")
+        logger.info(f"  Final output: {num_original:,} points (ALL original points preserved)")
+        logger.info(f"    - {len(matched_orig_indices):,} points have predictions")
+        logger.info(f"    - {num_original - len(matched_orig_indices):,} points have no predictions (default values)")
         return True
     except Exception as e:
         logger.error(f"Failed to process prediction file: {e}")
@@ -443,17 +667,38 @@ def process_single_file(input_file, intermediate_output_dir, final_output_dir, m
     
     logger.info(f"Processing: {os.path.basename(input_file)}")
     
-    # Convert LAS/LAZ to PLY if needed for processing
-    os.makedirs(CONFIG.TEST_DATA_DIR, exist_ok=True)
+    # Standardize file with caching (ensures consistent field names)
+    try:
+        from tools.standardize_with_cache import get_standardized_file
+        standardized_file = get_standardized_file(
+            input_file,
+            preserve_labels=False,  # Don't preserve labels for inference
+            force_recompute=False
+        )
+        if standardized_file is None:
+            logger.warning(f"Standardization failed, using original file: {input_file}")
+            standardized_file = input_file
+        else:
+            logger.info(f"  Using standardized file: {os.path.basename(standardized_file)}")
+    except Exception as e:
+        logger.warning(f"Standardization with cache failed ({e}), using original file")
+        standardized_file = input_file
     
-    if file_ext in ['.las', '.laz']:
-        ply_file = os.path.join(CONFIG.TEST_DATA_DIR, f"{base_name}.ply")
+    # Copy standardized file to test_data directory
+    os.makedirs(CONFIG.TEST_DATA_DIR, exist_ok=True)
+    ply_file = os.path.join(CONFIG.TEST_DATA_DIR, f"{base_name}.ply")
+    
+    if standardized_file != input_file:
+        # Use standardized version
+        shutil.copy2(standardized_file, ply_file)
+    elif file_ext in ['.las', '.laz']:
+        # Convert LAS/LAZ to PLY (standardization should have handled this, but fallback)
         logger.info(f"  Converting to PLY...")
         if not convert_las_to_ply(input_file, ply_file):
             logger.error(f"Failed to convert {input_file}")
             return False
     elif file_ext == '.ply':
-        ply_file = os.path.join(CONFIG.TEST_DATA_DIR, f"{base_name}.ply")
+        # Copy PLY file as-is
         shutil.copy2(input_file, ply_file)
     else:
         logger.error(f"Unsupported file format: {file_ext}")
@@ -550,13 +795,13 @@ def cleanup_intermediate_files(base_name, intermediate_output_dir):
 # MAIN FUNCTION
 #####################################################################
 
-def run_inference_on_files(input_files, model_path=None, config_file=None, output_dir=None, cuda_device="0", keep_intermediate=False):
+def run_inference_on_files(input_files, model_path, config_file=None, output_dir=None, cuda_device="0", keep_intermediate=False):
     """
     Run inference on multiple files programmatically.
     
     Args:
         input_files: List of input file paths (PLY or LAS/LAZ)
-        model_path: Path to model checkpoint (None = auto-detect)
+        model_path: Path to model checkpoint (REQUIRED)
         config_file: Path to config file (None = use default)
         output_dir: Output directory (None = create timestamped directory)
         cuda_device: CUDA device ID
@@ -568,12 +813,40 @@ def run_inference_on_files(input_files, model_path=None, config_file=None, outpu
     # Change to work directory
     os.chdir(CONFIG.WORK_DIR)
     
-    # Find model checkpoint
-    model_path = find_model_checkpoint(model_path)
+    # Validate model checkpoint
+    if model_path is None:
+        raise ValueError("model_path is required. Please specify --model argument.")
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Model checkpoint not found: {model_path}")
     
-    # Get config file
+    # Get config file - auto-detect based on model
     if config_file is None:
-        config_file = CONFIG.CONFIG_FILE
+        # Check if using scanner features model
+        model_path_lower = model_path.lower()
+        if 'features' in model_path_lower or 'heidelberg_features' in model_path_lower:
+            # Use scenario-specific config if available, otherwise base config
+            if 'heidelberg' in model_path_lower:
+                heidelberg_config = os.path.join(CONFIG.WORK_DIR, "configs/oneformer3d_features_heidelberg.py")
+                if os.path.exists(heidelberg_config):
+                    config_file = heidelberg_config
+                else:
+                    config_file = CONFIG.CONFIG_FILE  # Base scanner features config
+            elif 'uwaterloo' in model_path_lower:
+                uwaterloo_config = os.path.join(CONFIG.WORK_DIR, "configs/oneformer3d_features_uwaterloo.py")
+                if os.path.exists(uwaterloo_config):
+                    config_file = uwaterloo_config
+                else:
+                    config_file = CONFIG.CONFIG_FILE
+            elif 'combined' in model_path_lower:
+                combined_config = os.path.join(CONFIG.WORK_DIR, "configs/oneformer3d_features_combined.py")
+                if os.path.exists(combined_config):
+                    config_file = combined_config
+                else:
+                    config_file = CONFIG.CONFIG_FILE
+            else:
+                config_file = CONFIG.CONFIG_FILE  # Base scanner features config
+        else:
+            config_file = CONFIG.LEGACY_CONFIG_FILE  # Legacy config
     if not os.path.exists(config_file):
         raise FileNotFoundError(f"Config file not found: {config_file}")
     
@@ -613,20 +886,17 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Process single file
-  python infer_forestformer3d.py --input file.ply
+  # Process single file (model required)
+  python infer_forestformer3d.py --input file.ply --model work_dirs/heidelberg_features/epoch_500.pth
   
   # Process multiple files
-  python infer_forestformer3d.py --input file1.ply file2.las file3.ply
+  python infer_forestformer3d.py --input file1.ply file2.las file3.ply --model work_dirs/heidelberg_features/epoch_500.pth
   
   # Process all files in a directory
-  python infer_forestformer3d.py --input directory/
+  python infer_forestformer3d.py --input directory/ --model work_dirs/heidelberg_features/epoch_500.pth
   
   # Custom output directory
-  python infer_forestformer3d.py --input file.ply --output custom_output/
-  
-  # Custom model checkpoint
-  python infer_forestformer3d.py --input file.ply --model path/to/model.pth
+  python infer_forestformer3d.py --input file.ply --model work_dirs/heidelberg_features/epoch_500.pth --output custom_output/
         """
     )
     
@@ -647,7 +917,8 @@ Examples:
     )
     parser.add_argument(
         "--model",
-        help="Path to model checkpoint .pth file (optional)"
+        required=True,
+        help="Path to model checkpoint .pth file (REQUIRED)"
     )
     parser.add_argument(
         "--config",
@@ -655,8 +926,8 @@ Examples:
     )
     parser.add_argument(
         "--cuda-device",
-        default="0",
-        help="CUDA device ID (default: 0)"
+        default="auto",
+        help="CUDA device ID (default: 'auto' to auto-select, or specify 0, 1, 2, etc.)"
     )
     parser.add_argument(
         "--verbose",
@@ -690,6 +961,42 @@ Examples:
     else:
         display_output = "inference_runs/run_TIMESTAMP"
     
+    # Auto-select GPU if requested
+    cuda_device = args.cuda_device
+    if cuda_device.lower() == "auto":
+        logger.info("Auto-detecting best available GPU...")
+        best_gpu = find_best_gpu(min_free_mb=5000, max_utilization=80)
+        
+        if best_gpu is None:
+            logger.error("No suitable GPU found (need at least 5GB free memory and <80% utilization)")
+            display_gpu_status()
+            logger.error("\nAll GPUs are busy or don't have enough free memory.")
+            logger.error("Please free up GPU memory or specify a GPU manually with --cuda-device")
+            sys.exit(1)
+        
+        cuda_device = best_gpu
+        gpu_info = get_gpu_memory_info()
+        selected_gpu = next((g for g in gpu_info if str(g['device_id']) == cuda_device), None)
+        if selected_gpu:
+            logger.info(f"Selected GPU {cuda_device}: {selected_gpu['free_mb']/1024:.2f} GB free, "
+                       f"{selected_gpu['utilization']:.1f}% utilization")
+        else:
+            logger.info(f"Selected GPU {cuda_device}")
+    else:
+        # Validate manually specified GPU
+        try:
+            device_id = int(cuda_device)
+            gpu_info = get_gpu_memory_info()
+            if gpu_info:
+                gpu = next((g for g in gpu_info if g['device_id'] == device_id), None)
+                if gpu:
+                    logger.info(f"Using GPU {device_id}: {gpu['free_mb']/1024:.2f} GB free, "
+                               f"{gpu['utilization']:.1f}% utilization")
+                else:
+                    logger.warning(f"GPU {device_id} not found in system")
+        except ValueError:
+            logger.warning(f"Invalid GPU device ID: {cuda_device}, using as-is")
+    
     logger.info(f"Using model checkpoint: {find_model_checkpoint(args.model)}")
     logger.info(f"Output: {display_output}")
     logger.info("")
@@ -701,7 +1008,7 @@ Examples:
             model_path=args.model,
             config_file=args.config,
             output_dir=args.output,
-            cuda_device=args.cuda_device,
+            cuda_device=cuda_device,
             keep_intermediate=args.keep_intermediate_files
         )
         

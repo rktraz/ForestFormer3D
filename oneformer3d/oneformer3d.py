@@ -1196,9 +1196,15 @@ class ForAINetV2OneFormer3D(Base3DDetector):
                 Tensor: instance mask of shape (n_raw_points,).
         """
         stuff_cls = pred_masks.new_tensor(self.test_cfg.stuff_cls).long()
-        sem_map = self.pred_sem(
-            pred_masks[-self.test_cfg.num_sem_cls + stuff_cls, :], superpoints)
-        sem_map_src_mapping = stuff_cls[sem_map]
+        # Handle case when there are no stuff classes (stuff_cls is empty)
+        if len(stuff_cls) == 0:
+            # No stuff classes, create a dummy semantic map (all zeros)
+            sem_map = torch.zeros(superpoints.shape[0], dtype=torch.long, device=pred_masks.device)
+            sem_map_src_mapping = sem_map
+        else:
+            sem_map = self.pred_sem(
+                pred_masks[-self.test_cfg.num_sem_cls + stuff_cls, :], superpoints)
+            sem_map_src_mapping = stuff_cls[sem_map]
 
         n_cls = self.test_cfg.num_sem_cls
         thr = self.test_cfg.pan_score_thr
@@ -1259,9 +1265,15 @@ class ForAINetV2OneFormer3D(Base3DDetector):
                 Tensor: instance mask of shape (n_raw_points,).
         """
         stuff_cls = pred_masks.new_tensor(self.test_cfg.stuff_cls).long()
-        sem_map = self.pred_sem(
-            pred_masks[-self.test_cfg.num_sem_cls + stuff_cls, :], superpoints)
-        sem_map_src_mapping = stuff_cls[sem_map]
+        # Handle case when there are no stuff classes (stuff_cls is empty)
+        if len(stuff_cls) == 0:
+            # No stuff classes, create a dummy semantic map (all zeros)
+            sem_map = torch.zeros(superpoints.shape[0], dtype=torch.long, device=pred_masks.device)
+            sem_map_src_mapping = sem_map
+        else:
+            sem_map = self.pred_sem(
+                pred_masks[-self.test_cfg.num_sem_cls + stuff_cls, :], superpoints)
+            sem_map_src_mapping = stuff_cls[sem_map]
 
         n_cls = self.test_cfg.num_sem_cls
         thr = self.test_cfg.pan_score_thr
@@ -1570,15 +1582,21 @@ class ForAINetV2OneFormer3D(Base3DDetector):
         output_dir = os.path.dirname(filename)
         os.makedirs(output_dir, exist_ok=True)
         
+        # Extract only x, y, z coordinates (first 3 dimensions) if points have more dimensions
+        if points.shape[1] > 3:
+            points_xyz = points[:, :3]
+        else:
+            points_xyz = points
+        
         dtype = [('x', 'f4'), ('y', 'f4'), ('z', 'f4'), 
                 ('semantic_pred', 'i4'), ('instance_pred', 'i4'), ('score', 'f4')]
         
         if semantic_gt is not None and instance_gt is not None:
             dtype += [('semantic_gt', 'i4'), ('instance_gt', 'i4')]
-            vertex = np.array([tuple(points[i]) + (semantic_pred[i], instance_pred[i], scores[i], semantic_gt[i], instance_gt[i]) for i in range(points.shape[0])],
+            vertex = np.array([tuple(points_xyz[i]) + (semantic_pred[i], instance_pred[i], scores[i], semantic_gt[i], instance_gt[i]) for i in range(points_xyz.shape[0])],
                             dtype=dtype)
         else:
-            vertex = np.array([tuple(points[i]) + (semantic_pred[i], instance_pred[i], scores[i]) for i in range(points.shape[0])],
+            vertex = np.array([tuple(points_xyz[i]) + (semantic_pred[i], instance_pred[i], scores[i]) for i in range(points_xyz.shape[0])],
                             dtype=dtype)
 
         el = PlyElement.describe(vertex, 'vertex')
@@ -1959,8 +1977,11 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
         total_semantic_loss_bi /= batch_size
 
         # Add to total loss
+        # Weight discriminative_loss to de-emphasize instance segmentation
+        # Since user only cares about semantic segmentation (wood vs leaf)
+        discriminative_loss_weight = 0.01  # Very low weight - instance segmentation not important
         loss_final = {
-            'discriminative_loss': total_discriminative_loss,
+            'discriminative_loss': total_discriminative_loss * discriminative_loss_weight,
             'semantic_loss_bi': total_semantic_loss_bi
         }
 
@@ -1969,7 +1990,9 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
         queries_idx = []
 
         if self.prepare_epoch:
-            if kwargs['epoch'] > self.prepare_epoch:
+            # Get epoch from kwargs if available, otherwise skip this check
+            current_epoch = kwargs.get('epoch', 0)
+            if current_epoch > self.prepare_epoch:
                 total_qscore_loss = 0
                 for i in range(batch_size):
                     voxel_superpoints = inverse_mapping[coordinates[:, 0][inverse_mapping] == i]
@@ -2353,10 +2376,23 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
                 with torch.no_grad():
                     nn_idx_pc1 = []                
                     chunk = self.chunk
-                    for ss in range(0, pc1.shape[0], chunk):
-                        ee = min(ss + chunk, pc1.shape[0])
+                    # Extract only xyz coordinates (first 3 dims) for distance computation
+                    pc1_xyz = pc1[:, :3] if pc1.shape[1] > 3 else pc1
+                    pc3_xyz = pc3[:, :3] if pc3.shape[1] > 3 else pc3
+                    # Reduce chunk size if pc3 is very large to avoid OOM
+                    # Distance matrix size: chunk_size × pc3_size × 4 bytes (float32)
+                    # Limit to ~2GB per chunk to be safe: chunk_size × pc3_size × 4 < 2e9
+                    max_pc3_size = pc3_xyz.shape[0]
+                    if max_pc3_size > 0:
+                        # Calculate safe chunk size: 2GB / (pc3_size × 4 bytes)
+                        safe_chunk = min(chunk, int(2e9 / (max_pc3_size * 4)))
+                        safe_chunk = max(100, safe_chunk)  # At least 100 points per chunk
+                    else:
+                        safe_chunk = chunk
+                    for ss in range(0, pc1_xyz.shape[0], safe_chunk):
+                        ee = min(ss + safe_chunk, pc1_xyz.shape[0])
                         nn_idx_pc1.append(
-                            torch.cdist(pc1[ss:ee].float(), pc3.float()).argmin(1)
+                            torch.cdist(pc1_xyz[ss:ee].float(), pc3_xyz.float()).argmin(1)
                         )
                     nn_idx_pc1 = torch.cat(nn_idx_pc1)   # (N_pc1,)  
                 if tree_indices.numel() > 1:
@@ -3003,9 +3039,15 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
                 Tensor: instance mask of shape (n_raw_points,).
         """
         stuff_cls = pred_masks.new_tensor(self.test_cfg.stuff_cls).long()
-        sem_map = self.pred_sem(
-            pred_masks[-self.test_cfg.num_sem_cls + stuff_cls, :], superpoints)
-        sem_map_src_mapping = stuff_cls[sem_map]
+        # Handle case when there are no stuff classes (stuff_cls is empty)
+        if len(stuff_cls) == 0:
+            # No stuff classes, create a dummy semantic map (all zeros)
+            sem_map = torch.zeros(superpoints.shape[0], dtype=torch.long, device=pred_masks.device)
+            sem_map_src_mapping = sem_map
+        else:
+            sem_map = self.pred_sem(
+                pred_masks[-self.test_cfg.num_sem_cls + stuff_cls, :], superpoints)
+            sem_map_src_mapping = stuff_cls[sem_map]
 
         n_cls = self.test_cfg.num_sem_cls
         thr = self.test_cfg.pan_score_thr
@@ -3067,9 +3109,15 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
                 Tensor: instance mask of shape (n_raw_points,).
         """
         stuff_cls = pred_masks.new_tensor(self.test_cfg.stuff_cls).long()
-        sem_map = self.pred_sem(
-            pred_masks[-self.test_cfg.num_sem_cls + stuff_cls, :], superpoints)
-        sem_map_src_mapping = stuff_cls[sem_map]
+        # Handle case when there are no stuff classes (stuff_cls is empty)
+        if len(stuff_cls) == 0:
+            # No stuff classes, create a dummy semantic map (all zeros)
+            sem_map = torch.zeros(superpoints.shape[0], dtype=torch.long, device=pred_masks.device)
+            sem_map_src_mapping = sem_map
+        else:
+            sem_map = self.pred_sem(
+                pred_masks[-self.test_cfg.num_sem_cls + stuff_cls, :], superpoints)
+            sem_map_src_mapping = stuff_cls[sem_map]
 
         n_cls = self.test_cfg.num_sem_cls
         thr = self.test_cfg.pan_score_thr
@@ -3143,8 +3191,13 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
             instance_mask_clone[instance_mask_clone == -1] = background_label
         
         _, instance_mask_clone = torch.unique(instance_mask_clone, return_inverse=True, sorted=True)
+        # Handle empty instance mask (all background points)
+        if instance_mask_clone.numel() == 0 or instance_mask_clone.max() < 0:
+            # Create a dummy instance label for all points
+            instance_mask_clone = torch.zeros_like(instance_mask_clone) if instance_mask_clone.numel() > 0 else torch.zeros(pts_instance_mask.shape[0], dtype=pts_instance_mask.dtype, device=pts_instance_mask.device)
         # Convert the instance labels to one-hot encoding
-        one_hot_inst_mask = torch.nn.functional.one_hot(instance_mask_clone)
+        num_classes = int(instance_mask_clone.max().item()) + 1 if instance_mask_clone.numel() > 0 else 1
+        one_hot_inst_mask = torch.nn.functional.one_hot(instance_mask_clone, num_classes=num_classes)
 
         _, inverse_indices = torch.unique(voxel_superpoints, return_inverse=True, sorted=True)
 
@@ -3380,9 +3433,12 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
         N1     = pc1.size(0)
         out    = torch.empty((K, N1), dtype=preds.dtype, device=preds.device)
 
+        # Extract only xyz coordinates (first 3 dims) for distance computation
+        pc1_xyz = pc1[:, :3] if pc1.shape[1] > 3 else pc1
+        pc3_xyz = pc3[:, :3] if pc3.shape[1] > 3 else pc3
         for s in range(0, N1, chunk):
             e   = min(s + chunk, N1)
-            nn  = torch.cdist(pc1[s:e].float(), pc3.float()).argmin(dim=1)  # (c,)
+            nn  = torch.cdist(pc1_xyz[s:e].float(), pc3_xyz.float()).argmin(dim=1)  # (c,)
             out[:, s:e] = preds[:, nn]     # (K,c)
 
         return out.squeeze(0) if K == 1 else out
@@ -3403,10 +3459,13 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
         N1    = pc1.shape[0]
         out   = torch.empty((K, N1), dtype=preds.dtype, device=preds.device)
 
+        # Extract only xyz coordinates (first 3 dims) for distance computation
+        pc1_xyz = pc1[:, :3] if pc1.shape[1] > 3 else pc1
+        pc3_xyz = pc3[:, :3] if pc3.shape[1] > 3 else pc3
         for s in range(0, N1, chunk):
             e   = min(s + chunk, N1)
             # (c, 3) × (N3, 3) → (c, N3)
-            d   = torch.cdist(pc1[s:e].float(), pc3.float())   # fits in GPU
+            d   = torch.cdist(pc1_xyz[s:e].float(), pc3_xyz.float())   # fits in GPU
             nn  = d.argmin(dim=1)                              # (c,)
             out[:, s:e] = preds[:, nn]                         # gather once
 
@@ -3757,15 +3816,21 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
         output_dir = os.path.dirname(filename)
         os.makedirs(output_dir, exist_ok=True)
         
+        # Extract only x, y, z coordinates (first 3 dimensions) if points have more dimensions
+        if points.shape[1] > 3:
+            points_xyz = points[:, :3]
+        else:
+            points_xyz = points
+        
         dtype = [('x', 'f4'), ('y', 'f4'), ('z', 'f4'), 
                 ('semantic_pred', 'i4'), ('instance_pred', 'i4'), ('score', 'f4')]
         
         if semantic_gt is not None and instance_gt is not None:
             dtype += [('semantic_gt', 'i4'), ('instance_gt', 'i4')]
-            vertex = np.array([tuple(points[i]) + (semantic_pred[i], instance_pred[i], scores[i], semantic_gt[i], instance_gt[i]) for i in range(points.shape[0])],
+            vertex = np.array([tuple(points_xyz[i]) + (semantic_pred[i], instance_pred[i], scores[i], semantic_gt[i], instance_gt[i]) for i in range(points_xyz.shape[0])],
                             dtype=dtype)
         else:
-            vertex = np.array([tuple(points[i]) + (semantic_pred[i], instance_pred[i], scores[i]) for i in range(points.shape[0])],
+            vertex = np.array([tuple(points_xyz[i]) + (semantic_pred[i], instance_pred[i], scores[i]) for i in range(points_xyz.shape[0])],
                             dtype=dtype)
 
         el = PlyElement.describe(vertex, 'vertex')
@@ -3821,15 +3886,21 @@ class ForAINetV2OneFormer3D_XAwarequery(Base3DDetector):
             prev_semantic_pred = np.array(plydata['vertex']['semantic_pred'])  # 读取存储的 semantic_pred
             semantic_pred = prev_semantic_pred  # Override input semantic_pred
 
+        # Extract only x, y, z coordinates (first 3 dimensions) if points have more dimensions
+        if points.shape[1] > 3:
+            points_xyz = points[:, :3]
+        else:
+            points_xyz = points
+
         # Filter points that meet the condition
         mask = (semantic_pred != 0) & (instance_pred == -1)
-        points_filtered = points[mask]
+        points_filtered = points_xyz[mask]
         semantic_pred_filtered = semantic_pred[mask]  # 也保存 semantic_pred
         semantic_gt_filtered = semantic_gt[mask] if semantic_gt is not None else None
         instance_gt_filtered = instance_gt[mask] if instance_gt is not None else None
 
         # Keep points that do not meet the condition
-        points_remain = points[~mask]
+        points_remain = points_xyz[~mask]
         semantic_pred_remain = semantic_pred[~mask]
         instance_pred_remain = instance_pred[~mask]
         scores_remain = scores[~mask]
@@ -4564,9 +4635,15 @@ class S3DISOneFormer3D(Base3DDetector):
                 Tensor: instance mask of shape (n_raw_points,).
         """
         stuff_cls = pred_masks.new_tensor(self.test_cfg.stuff_cls).long()
-        sem_map = self.pred_sem(
-            pred_masks[-self.test_cfg.num_sem_cls + stuff_cls, :], superpoints)
-        sem_map_src_mapping = stuff_cls[sem_map]
+        # Handle case when there are no stuff classes (stuff_cls is empty)
+        if len(stuff_cls) == 0:
+            # No stuff classes, create a dummy semantic map (all zeros)
+            sem_map = torch.zeros(superpoints.shape[0], dtype=torch.long, device=pred_masks.device)
+            sem_map_src_mapping = sem_map
+        else:
+            sem_map = self.pred_sem(
+                pred_masks[-self.test_cfg.num_sem_cls + stuff_cls, :], superpoints)
+            sem_map_src_mapping = stuff_cls[sem_map]
 
         n_cls = self.test_cfg.num_sem_cls
         thr = self.test_cfg.pan_score_thr

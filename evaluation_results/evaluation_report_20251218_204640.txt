@@ -1,0 +1,73 @@
+ForestFormer3D Evaluation Report
+============================================================
+
+Evaluation timestamp: 2025-12-18 20:46:40
+Runtime: 24.7 seconds
+Model checkpoint: work_dirs/heidelberg_features/epoch_500.pth
+
+Aggregate Results Across All Test Files
+============================================================
+
+Total test files: 8
+Total points evaluated: 11016159
+
+Aggregate Metrics:
+- Accuracy: 0.8163
+- Balanced accuracy: 0.6921
+- Precision: 0.8408
+- Recall: 0.6921
+- F1: 0.7199
+- Jaccard index: 0.5886
+- Branch precision: 0.8740
+- Branch recall: 0.4072
+- Branch f1: 0.5556
+- Branch jaccard: 0.3846
+- Leaf precision: 0.8076
+- Leaf recall: 0.9770
+- Leaf f1: 0.8842
+- Leaf jaccard: 0.7925
+
+============================================================
+Results by File
+============================================================
+
+File: 107_labeled.las
+- Total points: 951165
+- F1 Score: 0.5440
+- Accuracy: 0.8021
+
+File: 129_labeled.ply
+- Total points: 1841812
+- F1 Score: 0.4250
+- Accuracy: 0.6177
+
+File: 236_labeled.las
+- Total points: 817091
+- F1 Score: 0.5256
+- Accuracy: 0.7876
+
+File: 245_labeled.las
+- Total points: 1006143
+- F1 Score: 0.5574
+- Accuracy: 0.7591
+
+File: 251_labeled.las
+- Total points: 27076
+- F1 Score: 0.4606
+- Accuracy: 0.5663
+
+File: FagSyl_BR05_P8T4_2019-07-10_q2_TLS-on_c.ply
+- Total points: 2132001
+- F1 Score: 0.8780
+- Accuracy: 0.8870
+
+File: PinSyl_KA10_03_2019-07-30_q2_TLS-on_c.ply
+- Total points: 1322666
+- F1 Score: 0.8726
+- Accuracy: 0.8942
+
+File: QueRub_KA09_T053_2019-08-20_q1_TLS-on_c.ply
+- Total points: 2918205
+- F1 Score: 0.7247
+- Accuracy: 0.8894
+

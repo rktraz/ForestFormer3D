@@ -23,6 +23,16 @@ class ForAINetV2Data(object):
         self.split = split
         self.split_dir = osp.join(root_path)
         
+        # Auto-detect instance_data directory name
+        # Look for directories matching pattern: forainetv2*instance_data
+        self.instance_data_dir = 'forainetv2_instance_data'  # default
+        if osp.exists(root_path):
+            for item in os.listdir(root_path):
+                item_path = osp.join(root_path, item)
+                if osp.isdir(item_path) and 'instance_data' in item:
+                    self.instance_data_dir = item
+                    break
+        
         self.classes = [
                 'tree'
             ]
@@ -47,19 +57,19 @@ class ForAINetV2Data(object):
         return len(self.sample_id_list)
 
     def get_aligned_box_label(self, idx):
-        box_file = osp.join(self.root_dir, 'forainetv2_instance_data',
+        box_file = osp.join(self.root_dir, self.instance_data_dir,
                             f'{idx}_aligned_bbox.npy')
         mmengine.check_file_exist(box_file)
         return np.load(box_file)
 
     def get_unaligned_box_label(self, idx):
-        box_file = osp.join(self.root_dir, 'forainetv2_instance_data',
+        box_file = osp.join(self.root_dir, self.instance_data_dir,
                             f'{idx}_unaligned_bbox.npy')
         mmengine.check_file_exist(box_file)
         return np.load(box_file)
 
     def get_axis_align_matrix(self, idx):
-        matrix_file = osp.join(self.root_dir, 'forainetv2_instance_data',
+        matrix_file = osp.join(self.root_dir, self.instance_data_dir,
                                f'{idx}_axis_align_matrix.npy')
         mmengine.check_file_exist(matrix_file)
         return np.load(matrix_file)
@@ -84,9 +94,9 @@ class ForAINetV2Data(object):
         def process_single_scene(sample_idx):
             print(f'{self.split} sample_idx: {sample_idx}')
             info = dict()
-            pc_info = {'num_features': 3, 'lidar_idx': sample_idx}
+            pc_info = {'num_features': 6, 'lidar_idx': sample_idx}  # 6 channels: x,y,z + intensity,return_number,number_of_returns
             info['point_cloud'] = pc_info
-            pts_filename = osp.join(self.root_dir, 'forainetv2_instance_data',
+            pts_filename = osp.join(self.root_dir, self.instance_data_dir,
                                     f'{sample_idx}_vert.npy')
             points = np.load(pts_filename)
             mmengine.mkdir_or_exist(osp.join(self.save_path, 'points'))
@@ -94,7 +104,7 @@ class ForAINetV2Data(object):
                 osp.join(self.save_path, 'points', f'{sample_idx}.bin'))
             info['pts_path'] = osp.join('points', f'{sample_idx}.bin')
 
-            #sp_filename = osp.join(self.root_dir, 'forainetv2_instance_data',
+            #sp_filename = osp.join(self.root_dir, self.instance_data_dir,
             #                        f'{sample_idx}_sp_label.npy')
             #super_points = np.load(sp_filename)
             #mmengine.mkdir_or_exist(osp.join(self.save_path, 'super_points'))
@@ -104,10 +114,10 @@ class ForAINetV2Data(object):
 
             #if not self.test_mode:
             pts_instance_mask_path = osp.join(
-                self.root_dir, 'forainetv2_instance_data',
+                self.root_dir, self.instance_data_dir,
                 f'{sample_idx}_ins_label.npy')
             pts_semantic_mask_path = osp.join(
-                self.root_dir, 'forainetv2_instance_data',
+                self.root_dir, self.instance_data_dir,
                 f'{sample_idx}_sem_label.npy')
 
             pts_instance_mask = np.load(pts_instance_mask_path).astype(

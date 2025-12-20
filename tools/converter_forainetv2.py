@@ -23,8 +23,9 @@ def create_info_file(data_path,
         workers (int, optional): Number of threads to be used. Default: 4.
     """
     assert os.path.exists(data_path)
-    assert pkl_prefix in ['forainetv2'], \
-        f'unsupported dataset {pkl_prefix}'
+    # Allow 'forainetv2' or any prefix starting with 'forainetv2_'
+    assert pkl_prefix == 'forainetv2' or pkl_prefix.startswith('forainetv2_'), \
+        f'unsupported dataset {pkl_prefix} (must be "forainetv2" or start with "forainetv2_")'
     save_path = data_path if save_path is None else save_path
     assert os.path.exists(save_path)
 
@@ -35,7 +36,7 @@ def create_info_file(data_path,
         save_path, f'{pkl_prefix}_oneformer3d_infos_val.pkl')
     test_filename = os.path.join(
         save_path, f'{pkl_prefix}_oneformer3d_infos_test.pkl')
-    if pkl_prefix == 'forainetv2':
+    if pkl_prefix == 'forainetv2' or pkl_prefix.startswith('forainetv2_'):
         # ScanNet has a train-val-test split
         # Check if split files exist and have content
         train_list_file = os.path.join(data_path, 'meta_data', 'train_list.txt')
@@ -78,9 +79,27 @@ def create_info_file(data_path,
             mmengine.dump([], val_filename, 'pkl')
             print(f'{pkl_prefix} info val file is empty, saved to {val_filename}')
         
-        # Process test split
-        test_dataset = ForAINetV2Data(root_path=data_path, split='test')
-        infos_test = test_dataset.get_infos(
-            num_workers=workers, has_label=True)
-        mmengine.dump(infos_test, test_filename, 'pkl')
-        print(f'{pkl_prefix} info test file is saved to {test_filename}')
+        # Process test split if it exists and has content
+        if os.path.exists(test_list_file):
+            test_samples = [s.strip() for s in mmengine.list_from_file(test_list_file) if s.strip()]
+            if test_samples:
+                test_dataset = ForAINetV2Data(root_path=data_path, split='test')
+                infos_test = test_dataset.get_infos(
+                    num_workers=workers, has_label=True)
+                mmengine.dump(infos_test, test_filename, 'pkl')
+                print(f'{pkl_prefix} info test file is saved to {test_filename}')
+            else:
+                # Create empty test file
+                mmengine.dump([], test_filename, 'pkl')
+                print(f'{pkl_prefix} info test file is empty, saved to {test_filename}')
+        else:
+            # If no test split, use val split as test
+            print(f'No test_list.txt found, using val split as test')
+            if os.path.exists(val_filename):
+                import shutil
+                shutil.copy2(val_filename, test_filename)
+                print(f'{pkl_prefix} info test file (copied from val) is saved to {test_filename}')
+            else:
+                # Create empty test file
+                mmengine.dump([], test_filename, 'pkl')
+                print(f'{pkl_prefix} info test file is empty, saved to {test_filename}')

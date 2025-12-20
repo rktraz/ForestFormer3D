@@ -388,7 +388,7 @@ def update_forainetv2_infos(pkl_path, out_dir):
         time.sleep(5)
     METAINFO = {
         'classes':
-        ('tree')
+        ('tree',)  # Note: comma makes it a tuple, not a string
     }
     print(f'Reading from input file: {pkl_path}.')
     data_list = mmengine.load(pkl_path)

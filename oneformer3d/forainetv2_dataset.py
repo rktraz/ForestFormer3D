@@ -9,14 +9,16 @@ from mmdet3d.registry import DATASETS
 @DATASETS.register_module()
 class ForAINetV2SegDataset_(ScanNetDataset):
     """We just add super_pts_path."""
+    # Default METAINFO (can be overridden by config)
+    # Note: All labels are now 0-indexed: 0=wood, 1=leaf
     METAINFO = {
         'classes':
-        ('ground','wood','leaf'),
-        'palette': [[0, 255, 0],[0, 0, 255], [0, 255, 255]],
+        ('wood','leaf'),  # Updated: no ground, only wood and leaf
+        'palette': [[0, 0, 255], [0, 255, 255]],  # wood=blue, leaf=cyan
         'seg_valid_class_ids':
-        (0, 1, 2),
+        (0, 1),  # 0-indexed: 0=wood, 1=leaf
         'seg_all_class_ids':
-        (0, 1, 2)  # possibly with 'stair' class
+        (0, 1)  # 0-indexed: 0=wood, 1=leaf
     }
 
     def get_scene_idxs(self, *args, **kwargs):
